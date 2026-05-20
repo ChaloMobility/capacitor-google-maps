@@ -526,7 +526,7 @@ class CapacitorGoogleMap(
                     marker.getMarkerId()?.let { markerIdOnWeb.add(it) }
 
                     val markerOptions = marker.getMarkerOptionsUpdated()
-     //               val googleMapMarker = googleMap?.addMarker(markerOptions)
+                    //               val googleMapMarker = googleMap?.addMarker(markerOptions)
                     if(marker.rotation == 1) {
                         if (marker.angleDiff > 0) {
                             markerOptions.rotation(marker.angleDiff)
@@ -673,31 +673,33 @@ class CapacitorGoogleMap(
         }
     }
 
-    private fun createInfoWindowAsMarker(originalMarker: CapacitorGoogleMapMarker, googleMapMarker: Marker) {
+    private fun createSingleInfoWindowMarker(originalMarker: CapacitorGoogleMapMarker, googleMapMarker: Marker) {
+        if (infoWindowMarkers.containsKey(googleMapMarker.id)) return
+
         CoroutineScope(Dispatchers.Main).launch {
-            if (infoWindowMarkers.containsKey(googleMapMarker.id)) {
+            if (infoWindowMarkers.containsKey(googleMapMarker.id)) return@launch
+
+            val infoWindowBitmap = withContext(Dispatchers.Default) {
+                multipleInfoWindowView.createInfoWindowBitmap(originalMarker)
+            }
+
+            // Re-validate after suspension
+            val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+            if (currentZoom < multipleInfoWindowZoomLevel || infoWindowMarkers.containsKey(googleMapMarker.id)) {
                 return@launch
             }
 
-            val infoWindowPosition = calculateInfoWindowPosition(googleMapMarker.position)
-            // Create info window marker options
             val infoWindowMarkerOptions = MarkerOptions()
-                .position(infoWindowPosition)
+                .position(calculateInfoWindowPosition(googleMapMarker.position))
                 .flat(true)
                 .zIndex(googleMapMarker.zIndex + 1.0f)
+                .icon(BitmapDescriptorFactory.fromBitmap(infoWindowBitmap))
 
             if (originalMarker.infoIcon?.contains("reverse") == true) {
                 infoWindowMarkerOptions.anchor(0.4f, -0.15f)
             } else {
                 infoWindowMarkerOptions.anchor(0.4f, 1.0f)
             }
-
-            // Create bitmap in background thread to avoid UI blocking
-            val infoWindowBitmap = withContext(Dispatchers.Default) {
-                multipleInfoWindowView.createInfoWindowBitmap(originalMarker)
-            }
-
-            infoWindowMarkerOptions.icon(BitmapDescriptorFactory.fromBitmap(infoWindowBitmap))
 
             val infoWindowMarker = googleMap?.addMarker(infoWindowMarkerOptions)
             infoWindowMarker?.tag = hashMapOf(
@@ -721,12 +723,10 @@ class CapacitorGoogleMap(
     }
 
     private fun removeInfoWindowMarker(originalMarkerId: String) {
-        CoroutineScope(Dispatchers.Main).launch {
-            val infoWindowMarker = infoWindowMarkers[originalMarkerId]
-            if (infoWindowMarker != null) {
-                infoWindowMarker.remove() // PROPERLY REMOVE FROM MAP
-                infoWindowMarkers.remove(originalMarkerId)
-            }
+        val infoWindowMarker = infoWindowMarkers[originalMarkerId]
+        if (infoWindowMarker != null) {
+            infoWindowMarker.remove() // PROPERLY REMOVE FROM MAP
+            infoWindowMarkers.remove(originalMarkerId)
         }
     }
 
@@ -884,7 +884,7 @@ class CapacitorGoogleMap(
                         } else {
                             // Create new info window only if it doesn't exist
                             oldMarker?.googleMapMarker?.let { googleMapMarker ->
-                                createInfoWindowAsMarker(marker, googleMapMarker)
+                                createSingleInfoWindowMarker(marker, googleMapMarker)
                             }
                         }
                     } else {
@@ -1084,15 +1084,40 @@ class CapacitorGoogleMap(
 
             if (existingMarkerEntry != null) {
                 val oldMarker = existingMarkerEntry.value
-                // Update marker position
-                oldMarker.googleMapMarker?.position = marker.coordinate
-                oldMarker.coordinate = marker.coordinate
+                val gmMarkerId = existingMarkerEntry.key
 
-                val infoWindowMarker = infoWindowMarkers[marker.id]
-                if (infoWindowMarker != null) {
-                    val newInfoWindowPosition = calculateInfoWindowPosition(marker.coordinate)
-                    infoWindowMarker.position = newInfoWindowPosition
+                // Handle multiple info window zoom-based visibility
+                val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+                val shouldShowInfoWindow = currentZoom >= multipleInfoWindowZoomLevel
+
+                if (marker.infoIcon?.contains("multiple_info_window") == true) {
+                    val existingInfoWindow = infoWindowMarkers[gmMarkerId]
+                    if (existingInfoWindow != null) {
+                        if (shouldShowInfoWindow) {
+                            // Update existing info window position
+                            existingInfoWindow.position = calculateInfoWindowPosition(marker.coordinate)
+                            existingInfoWindow.zIndex = oldMarker.googleMapMarker?.zIndex?.plus(10.0f) ?: 1000.0f
+                        } else {
+                            // Remove info window if zoom level is too low
+                            removeInfoWindowMarker(gmMarkerId)
+                        }
+                    }
+                    // New info window creation is deferred to onCameraIdle via updateInfoWindowsForCurrentZoom
                 }
+
+                // Update marker data on oldMarker for future info window recreation
+                oldMarker.infoIcon = marker.infoIcon
+                oldMarker.infoData = marker.infoData
+                oldMarker.title = marker.title
+
+                // Animate marker position (with info window synced frame-by-frame via animateMarker)
+                if (oldMarker.position.latitude != marker.coordinate.latitude
+                    || oldMarker.position.longitude != marker.coordinate.longitude) {
+                    marker.infoData?.optLong("animationDuration")?.takeIf { it >= 0 }?.let { duration ->
+                        animateMarker(oldMarker.googleMapMarker, marker.coordinate, duration)
+                    } ?: animateMarker(oldMarker.googleMapMarker, marker.coordinate)
+                }
+                oldMarker.coordinate = marker.coordinate
 
                 if(marker.rotation == 1){
                     if(marker.angleDiff>0){
@@ -1136,6 +1161,8 @@ class CapacitorGoogleMap(
                      strokeWidths: MutableList<Int>,
                      zIndexs: MutableList<Int>,
                      strokeOpacities: MutableList<Int>,
+                     lineDashLengths: MutableList<Float>,
+                     lineDashGaps: MutableList<Float>,
                      callback: (ids: Result<List<String>>) -> Unit
     ) {
         // addPolylines is our custom implementation. If we want to use both add and remove polylines we can copy the plugins code here addPolylines
@@ -1151,6 +1178,15 @@ class CapacitorGoogleMap(
                     polylineOptions.width(strokeWidths[index].toFloat())
                     polylineOptions.color(Color.parseColor(strokeColors[index]))
                     polylineOptions.zIndex(zIndexs[index].toFloat())
+
+                    // Apply dashed pattern if lineDashLength > 0
+                    val dashLength = lineDashLengths[index]
+                    val dashGap = lineDashGaps[index]
+                    if (dashLength > 0f && dashGap > 0f) {
+                        val pattern = listOf(Dash(dashLength), Gap(dashGap))
+                        polylineOptions.pattern(pattern)
+                    }
+
                     val googleMapPolyline = googleMap?.addPolyline(polylineOptions)
                     customPolylines[googleMapPolyline!!.id] = googleMapPolyline
 
@@ -1193,7 +1229,10 @@ class CapacitorGoogleMap(
 
 
 
-                googleMap?.setOnCameraIdleListener(clusterManager)
+                googleMap?.setOnCameraIdleListener {
+                    clusterManager?.onCameraIdle()
+                    updateInfoWindowsForCurrentZoom()
+                }
 //                googleMap?.setOnMarkerClickListener(clusterManager)
                 googleMap?.setOnInfoWindowClickListener(clusterManager)
 
@@ -1926,8 +1965,10 @@ class CapacitorGoogleMap(
         delegate.notify("onMarkerClick", data)
         val markerData = marker.tag as? CapacitorGoogleMapMarker
         if (markerData?.infoIcon == "not_show_info_window") {
-            delegate.notify("onMarkerClick", data)
             return true  // true = consume the event, don't show info window
+        }
+         if (markerData?.infoIcon?.contains("multiple_info_window") == true) {
+            return true  // info displayed via separate bitmap marker, suppress default info window
         }
         return false
     }
@@ -1999,6 +2040,7 @@ class CapacitorGoogleMap(
         data.put("zoom", this@CapacitorGoogleMap.googleMap?.cameraPosition?.zoom)
         delegate.notify("onCameraIdle", data)
         delegate.notify("onBoundsChanged", data)
+        updateInfoWindowsForCurrentZoom()
     }
 
     override fun onCameraMoveStarted(reason: Int) {
@@ -2024,60 +2066,101 @@ class CapacitorGoogleMap(
         debounceJob = CoroutineScope(Dispatchers.Main).launch {
             delay(150)
             clusterManager?.cluster()
-            updateInfoWindowsForCurrentZoom()
+            // Only hide info windows during active gesture; creation deferred to onCameraIdle
+            val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+            if (currentZoom < multipleInfoWindowZoomLevel) {
+                hideAllMultipleInfoWindows()
+            }
         }
     }
     private fun updateInfoWindowsForCurrentZoom() {
-        CoroutineScope(Dispatchers.Main).launch {
-            val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
-            val shouldShowInfoWindows = currentZoom >= multipleInfoWindowZoomLevel
+        val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+        val shouldShowInfoWindows = currentZoom >= multipleInfoWindowZoomLevel
 
-            // Immediate update without delay
-            if (shouldShowInfoWindows) {
-                showAllMultipleInfoWindows()
-            } else {
-                hideAllMultipleInfoWindows()
-            }
+        // Always clean up stale info windows first (synchronous)
+        cleanupStaleInfoWindows()
 
-            cleanupStaleInfoWindows();
+        if (shouldShowInfoWindows) {
+            showAllMultipleInfoWindows()
+        } else {
+            hideAllMultipleInfoWindows()
         }
     }
 
     private fun cleanupStaleInfoWindows() {
-        CoroutineScope(Dispatchers.Main).launch {
-            val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
-            val shouldShowInfoWindows = currentZoom >= multipleInfoWindowZoomLevel
+        val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+        val shouldShowInfoWindows = currentZoom >= multipleInfoWindowZoomLevel
 
-            val markersToRemove = mutableListOf<String>()
+        val markersToRemove = mutableListOf<String>()
 
-            // Clean up info windows that don't have corresponding markers anymore
-            infoWindowMarkers.forEach { (originalMarkerId, infoWindowMarker) ->
-                val markerExists = markers.containsKey(originalMarkerId) &&
-                        markers[originalMarkerId]?.googleMapMarker != null
+        // Clean up info windows that don't have corresponding markers anymore
+        infoWindowMarkers.forEach { (originalMarkerId, infoWindowMarker) ->
+            val markerExists = markers.containsKey(originalMarkerId) &&
+                    markers[originalMarkerId]?.googleMapMarker != null
 
-                if (!markerExists) {
-                    // Remove if original marker doesn't exist
-                    markersToRemove.add(originalMarkerId)
-                    infoWindowMarker.remove()
-                } else if (!shouldShowInfoWindows) {
-                    // Remove if zoomed out beyond the threshold
-                    markersToRemove.add(originalMarkerId)
-                    infoWindowMarker.remove()
-                }
+            if (!markerExists) {
+                // Remove if original marker doesn't exist
+                markersToRemove.add(originalMarkerId)
+                infoWindowMarker.remove()
+            } else if (!shouldShowInfoWindows) {
+                // Remove if zoomed out beyond the threshold
+                markersToRemove.add(originalMarkerId)
+                infoWindowMarker.remove()
             }
-
-            // Remove from our tracking map
-            markersToRemove.forEach { infoWindowMarkers.remove(it) }
         }
+
+        // Remove from our tracking map
+        markersToRemove.forEach { infoWindowMarkers.remove(it) }
     }
 
     private fun showAllMultipleInfoWindows() {
-        // Find all markers that should have multiple info windows and create them
-        markers.values.forEach { marker ->
-            if (marker.infoIcon?.contains("multiple_info_window") == true &&
-                infoWindowMarkers[marker.id] == null &&
-                marker.googleMapMarker != null) {
-                createInfoWindowAsMarker(marker, marker.googleMapMarker!!)
+        // Collect all markers that need info windows but don't have one yet
+        val markersNeedingInfoWindows = markers.values.filter { marker ->
+            val gmMarkerId = marker.googleMapMarker?.id
+            marker.infoIcon?.contains("multiple_info_window") == true &&
+                gmMarkerId != null &&
+                infoWindowMarkers[gmMarkerId] == null
+        }
+
+        if (markersNeedingInfoWindows.isEmpty()) return
+
+        // Batch: create all bitmaps in parallel on Default, then add all markers on Main
+        CoroutineScope(Dispatchers.Main).launch {
+            val bitmapResults = withContext(Dispatchers.Default) {
+                markersNeedingInfoWindows.map { marker ->
+                    marker to multipleInfoWindowView.createInfoWindowBitmap(marker)
+                }
+            }
+
+            // Re-validate zoom after suspension — camera may have changed
+            val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+            if (currentZoom < multipleInfoWindowZoomLevel) return@launch
+
+            // Add all info window markers in one batch on Main thread
+            for ((marker, bitmap) in bitmapResults) {
+                val gmMarker = marker.googleMapMarker ?: continue
+                // Skip if already created (by a concurrent path)
+                if (infoWindowMarkers.containsKey(gmMarker.id)) continue
+
+                val infoWindowMarkerOptions = MarkerOptions()
+                    .position(calculateInfoWindowPosition(gmMarker.position))
+                    .flat(true)
+                    .zIndex(gmMarker.zIndex + 1.0f)
+                    .icon(BitmapDescriptorFactory.fromBitmap(bitmap))
+
+                if (marker.infoIcon?.contains("reverse") == true) {
+                    infoWindowMarkerOptions.anchor(0.4f, -0.15f)
+                } else {
+                    infoWindowMarkerOptions.anchor(0.4f, 1.0f)
+                }
+
+                val infoWindowMarker = googleMap?.addMarker(infoWindowMarkerOptions)
+                infoWindowMarker?.tag = hashMapOf(
+                    "type" to "infoWindow",
+                    "originalMarkerId" to gmMarker.id,
+                    "markerData" to marker
+                )
+                infoWindowMarker?.let { infoWindowMarkers[gmMarker.id] = it }
             }
         }
     }
