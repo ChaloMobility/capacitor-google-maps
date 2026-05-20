@@ -236,9 +236,13 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
 
             var markers: [Marker] = []
 
-            try markerObjs.forEach { marker in
-                let marker = try Marker(fromJSObject: marker)
-                markers.append(marker)
+            for (index, markerObj) in markerObjs.enumerated() {
+                do {
+                    let marker = try Marker(fromJSObject: markerObj)
+                    markers.append(marker)
+                } catch {
+                    NSLog("CapacitorGoogleMaps: Skipping invalid marker at index \(index): \(error.localizedDescription)")
+                }
             }
 
             let ids = try map.addMarkers(markers: markers)
@@ -1125,6 +1129,9 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
                 throw GoogleMapErrors.invalidArguments("strokeOpacity is missing")
             }
 
+            let lineDashLength = polylineProps["lineDashLength"] as? Double ?? 0
+            let lineDashGap = polylineProps["lineDashGap"] as? Double ?? 0
+
             if cordsObjs.isEmpty {
                 throw GoogleMapErrors.invalidArguments("cordinates requires at least one cordinate")
             }
@@ -1143,7 +1150,7 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
                 cords.append(cord)
             }
 
-            let ids = try map.addPolyline(cords: cords, strokeWidth:strokeWidth, strokeColor:strokeColor, strokeOpacity:strokeOpacity)
+            let ids = try map.addPolyline(cords: cords, strokeWidth:strokeWidth, strokeColor:strokeColor, strokeOpacity:strokeOpacity, lineDashLength: lineDashLength, lineDashGap: lineDashGap)
 
             call.resolve(["ids": ids.map({ id in
                 return String(id)
@@ -1184,6 +1191,9 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
                 throw GoogleMapErrors.invalidArguments("zIndex is missing")
             }
 
+            let lineDashLength = polylineProps["lineDashLength"] as? Double ?? 0
+            let lineDashGap = polylineProps["lineDashGap"] as? Double ?? 0
+
             if polylineObjs.isEmpty {
                 throw GoogleMapErrors.invalidArguments("cordinates requires at least one cordinate")
             }
@@ -1196,6 +1206,8 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
             var strokeWidths: [Double] = []
             var zIndexs: [Double] = []
             var strokeOpacities: [Double] = []
+            var lineDashLengths: [Double] = []
+            var lineDashGaps: [Double] = []
             
             try polylineObjs.forEach { polylineObject in
                 guard let cordsObjs = polylineObject["polylinePath"] as? [JSObject] else {
@@ -1242,15 +1254,31 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
                     // If the current object doesn't have stroke opacity, set the default opacity
                     objStrokeOpacities = strokeOpacity as Double
                 }
+
+                var objLineDashLength: Double
+                if let polylineLineDashLength = polylineObject["polylineLineDashLength"] as? Double {
+                    objLineDashLength = polylineLineDashLength
+                } else {
+                    objLineDashLength = lineDashLength
+                }
+
+                var objLineDashGap: Double
+                if let polylineLineDashGap = polylineObject["polylineLineDashGap"] as? Double {
+                    objLineDashGap = polylineLineDashGap
+                } else {
+                    objLineDashGap = lineDashGap
+                }
                 
                 strokeColors.append(objStokeColor)
                 strokeWidths.append(objStrokeWidth)
                 zIndexs.append(objZIndex)
                 strokeOpacities.append(objStrokeOpacities)
+                lineDashLengths.append(objLineDashLength)
+                lineDashGaps.append(objLineDashGap)
                 polylines.append(cords)
             }
       
-            let ids = try map.addPolylines(polylines:polylines, strokeColors:strokeColors, strokeWidths:strokeWidths, zIndexs:zIndexs, strokeOpacities:strokeOpacities)
+            let ids = try map.addPolylines(polylines:polylines, strokeColors:strokeColors, strokeWidths:strokeWidths, zIndexs:zIndexs, strokeOpacities:strokeOpacities, lineDashLengths:lineDashLengths, lineDashGaps:lineDashGaps)
 
             call.resolve(["ids": ids.map({ id in
                 return String(id)
@@ -1369,18 +1397,35 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
             if((title?.isEmpty) != nil) {
                 title = userInfo.title
             }
-            
-            self.notifyListeners("onMarkerClick", data: [
+
+            var data: [String: Any] = [
                 "mapId": self.findMapIdByMapView(mapView),
                 "markerId": String(marker.hash.hashValue),
                 "latitude": marker.position.latitude,
                 "longitude": marker.position.longitude,
                 "title": title ?? "",
                 "snippet": marker.snippet ?? ""
-            ])
+            ]
             
+            // Add custom data
+            if let infoData = userInfo.infoData {
+                data["customData"] = infoData
+            }
+
+            if userInfo.infoIcon?.contains("not_show_info_window") == true {
+            // Still emit the click event, but consume it to prevent info window
+            notifyListeners("onMarkerClick", data: data)
+            return true  // Consume tap, don't show info window
+            }
+            
+            self.notifyListeners("onMarkerClick", data: data)
+            
+            // Check for the `showInfoWindow` flag in the marker's userData
+            if let showInfoWindow = userInfo.infoData?["showInfoWindow"] as? Bool, showInfoWindow {
+                return false // Allow the default behavior (show the info window)
+            }
         }
-        return false
+        return true // Suppress the default behavior (do not show the info window)
     }
 
     // onMarkerDragStart
@@ -1423,6 +1468,9 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
             guard let userData = marker.userData as? Marker,
                   let imageUrl = userData.infoIcon else {
                    return nil
+            }
+            if imageUrl.contains("not_show_info_window") {
+                return UIView()  // Return empty view (nil would fall through to default)
             }
             if(imageUrl == "buses_info_icon") {
                 let busesMarkerInfo = BusesMarkerInfoWindow.instanceFromNib()
@@ -1499,7 +1547,7 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
                 stopArrivalInfo.arrivalTime.text = arrivalTime
                 stopArrivalInfo.departureTime.text = departureTime
                 return stopArrivalInfo
-            }else if(imageUrl.contains("last_updated_info")) {
+            } else if(imageUrl.contains("last_updated_info")) {
                 if(imageUrl.contains("reverse")){
                     marker.infoWindowAnchor = CGPoint(x: 0.5, y: 1.4)
                     let lastUpdateInfo = LastUpdatedInfoWindowReversed.instanceFromNib()

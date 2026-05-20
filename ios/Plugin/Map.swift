@@ -133,6 +133,11 @@ public class Map {
     public static let MAP_TAG = 99999
     // swiftlint:enable identifier_name
 
+    // Icon cache to prevent texture atlas exhaustion
+    private var dynamicMarkerCache = [String: UIImage]()
+    private var resizedIconCache = [String: UIImage]()
+    private static let dynamicMarkerGenerator = DynamicMarkerGenerator()
+
     // swiftlint:disable weak_delegate
     private var delegate: CapacitorGoogleMapsPlugin
     var markerIdOnWeb = [String : Int]()
@@ -416,11 +421,22 @@ public class Map {
                         newMarker.snippet = ""
                     } else if let iconUrl = marker.iconUrl, iconUrl.contains("new_3d_marker") {
                         renderDynamicMarker(gmsMarker: newMarker, markerData: marker)
+                    } else if let iconUrl = marker.iconUrl, iconUrl.contains("route_name") {
+                        // Load the custom view
+                        let routeNameMarker = RouteNameMarker.instanceFromNib()
+                        let routeName = marker.title ?? ""
+                        routeNameMarker.configure(with: routeName)
+                        // Size the view to fit its content
+                        routeNameMarker.sizeToFit()
+                        // let routeNameMarker = RouteNameMarker.instanceFromNib()
+                        // routeNameMarker.routeNameLabel.text = "Route : " + (marker.id ?? "")
+                        newMarker.iconView = routeNameMarker
+                        newMarker.title = ""
+                        newMarker.snippet = ""
                     } else {
                         // If it is present in assets folder then the icon is picked from it
-//                        newMarker.icon = UIImage(named: marker.iconUrl ?? "")
-                        if let iconUrl = marker.iconUrl, let image = UIImage(named: iconUrl) {
-                            newMarker.icon = getResizedIcon(image,marker)
+                        if let iconUrl = marker.iconUrl {
+                            newMarker.icon = getCachedResizedIcon(iconUrl, marker)
                         }
                     }
                 }
@@ -552,7 +568,7 @@ public class Map {
     }
 
 
-    private func calculateInfoWindowScreenPosition(for coordinate: CLLocationCoordinate2D, markerId: Int, isSnippet: Bool, isReverseInfoWindow: Bool) -> CGPoint {
+    func calculateInfoWindowScreenPosition(for coordinate: CLLocationCoordinate2D, markerId: Int, isSnippet: Bool, isReverseInfoWindow: Bool) -> CGPoint {
         let point = self.mapViewController.GMapView.projection.point(for: coordinate)
         
         // Get the specific info window view for this marker
@@ -818,10 +834,8 @@ public class Map {
                         } else if let iconUrl = marker.iconUrl, iconUrl.contains("new_3d_marker") {
                             renderDynamicMarker(gmsMarker: oldMarker, markerData: marker)
                         } else {
-                            // If it is present in assets folder then the icon is picked from it
-//                            oldMarker.icon =  UIImage(named: marker.iconUrl ?? "")
-                            if let iconUrl = marker.iconUrl, let image = UIImage(named: iconUrl) {
-                                oldMarker.icon = getResizedIcon(image,marker)
+                            if let iconUrl = marker.iconUrl {
+                                oldMarker.icon = getCachedResizedIcon(iconUrl, marker)
                             }
                         }
                         
@@ -881,10 +895,8 @@ public class Map {
                                 oldMarker.iconView = busesMarker
                             }
                         } else {
-                            // If it is present in assets folder then the icon is picked from it
-//                            oldMarker.icon =  UIImage(named: marker.iconUrl ?? "")
-                            if let iconUrl = marker.iconUrl, let image = UIImage(named: iconUrl) {
-                                oldMarker.icon = getResizedIcon(image,marker)
+                            if let iconUrl = marker.iconUrl {
+                                oldMarker.icon = getCachedResizedIcon(iconUrl, marker)
                             }
                         }
                         
@@ -927,32 +939,96 @@ public class Map {
     }
     
      func setMarkerPositionNew(marker: Marker) throws  -> String  {
-             let element = self.removeMarkersArray.first(where:{$0.id == marker.id})
-            
-             if let oldMarker = self.markers[element?.keyValue ?? 0]  {
-                 DispatchQueue.main.sync {
-                     CATransaction.begin()
-                     CATransaction.setAnimationDuration(2.0)
-                     oldMarker.position = CLLocationCoordinate2D(latitude: marker.coordinate.lat, longitude: marker.coordinate.lng)
+             guard let markerId = marker.id,
+                   let hash = self.markerIdOnWeb[markerId],
+                   let oldMarker = self.markers[hash] else {
+                 NSLog("CapacitorGoogleMaps: setMarkerPositionNew - marker not found for id: \(marker.id ?? "nil")")
+                 return marker.id ?? ""
+             }
+
+             DispatchQueue.main.sync {
+                     // Extract animation duration from infoData
+                     var duration = 2.0
+                     if let infoData = marker.infoData {
+                         let animationDuration = (infoData["animationDuration"] as? Double) ??
+                                                    (Double(infoData["animationDuration"] as? String ?? "")) ??
+                                                    2000
+                         duration = animationDuration > 0 ? animationDuration / 1000 : 0
+                     }
+
+                     let startPosition = oldMarker.position
+                     let endPosition = CLLocationCoordinate2D(latitude: marker.coordinate.lat, longitude: marker.coordinate.lng)
+                     let positionChanged = startPosition.latitude != endPosition.latitude || startPosition.longitude != endPosition.longitude
+
+                     if positionChanged && duration > 0 {
+                         // Use CADisplayLink-based animation for reliable frame-by-frame marker + info window sync
+                         let markerHash = oldMarker.hash.hashValue
+                         let hasSnippet = !(marker.snippet?.isEmpty ?? true)
+                         let isReverse = marker.infoIcon?.contains("reverse") ?? false
+
+                         let helper = MarkerAnimationHelper(
+                             startTime: CACurrentMediaTime(),
+                             duration: duration,
+                             startLat: startPosition.latitude,
+                             startLng: startPosition.longitude,
+                             endLat: endPosition.latitude,
+                             endLng: endPosition.longitude,
+                             gmsMarker: oldMarker,
+                             infoWindowView: self.infoWindowMarkers[markerHash],
+                             mapView: self.mapViewController.GMapView,
+                             map: self,
+                             markerHash: markerHash,
+                             hasSnippet: hasSnippet,
+                             isReverse: isReverse,
+                             zoomLevel: self.multipleInfoWindowZoomLevel
+                         )
+                         let displayLink = CADisplayLink(target: helper, selector: #selector(MarkerAnimationHelper.step(_:)))
+                         displayLink.add(to: .main, forMode: .common)
+                     } else {
+                         // No animation — snap to final position
+                         oldMarker.position = endPosition
+                         if let mapView = self.mapViewController.GMapView {
+                             let currentZoom = mapView.camera.zoom
+                             let shouldShow = currentZoom >= self.multipleInfoWindowZoomLevel
+                             if let infoWindowView = self.infoWindowMarkers[oldMarker.hash.hashValue] {
+                                 if shouldShow {
+                                     let hasSnippet = !(marker.snippet?.isEmpty ?? true)
+                                     let pos = self.calculateInfoWindowScreenPosition(
+                                         for: oldMarker.position,
+                                         markerId: oldMarker.hash.hashValue,
+                                         isSnippet: hasSnippet,
+                                         isReverseInfoWindow: marker.infoIcon?.contains("reverse") ?? false
+                                     )
+                                     infoWindowView.frame.origin = pos
+                                     infoWindowView.isHidden = false
+                                 } else {
+                                     infoWindowView.isHidden = true
+                                 }
+                             } else if shouldShow {
+                                 if let infoIcon = marker.infoIcon, infoIcon.contains("multiple_info_window") {
+                                     self.createInfoWindowAsMarker(for: oldMarker, markerData: marker)
+                                 }
+                             }
+                         }
+                     }
+
+                     // Update title/icon/rotation (non-position properties)
                      oldMarker.title = marker.title
                      if marker.title?.range(of:"showInfoWindowTrue") != nil {
                          let customMarker = CustomMarker(title: marker.title!,coordinate: marker.coordinate)
                      oldMarker.iconView = customMarker.iconView
                  }
-     //               else if marker.title?.range(of:"busesAroundYou") != nil {
-     //                   let customMarker = BusesAroundYou(title: marker.title!,coordinate: marker.coordinate)
-     //                   oldMarker.iconView = customMarker.iconView
-     //               }
                  else{
                      oldMarker.title = marker.title
                  }
                  if let iconUrl = marker.iconUrl, iconUrl.contains("new_3d_marker") {
                      renderDynamicMarker(gmsMarker: oldMarker, markerData: marker)
-                 } else if let iconUrl = marker.iconUrl, let image = UIImage(named: iconUrl) {
-                     oldMarker.icon = getResizedIcon(image,marker)
+                 } else if let iconUrl = marker.iconUrl {
+                     if let cachedIcon = getCachedResizedIcon(iconUrl, marker) {
+                         oldMarker.icon = cachedIcon
+                     }
                  }
                  do {
-                     // Set the map style by passing the URL of the local file.
                      if((marker.rotation) == 1){
                              oldMarker.rotation =  try self.getAngle(marker: marker)
                      }else{
@@ -961,11 +1037,8 @@ public class Map {
                      } catch {
                      NSLog("Error in angle. \(error)")
                  }
-                 CATransaction.commit()
+                 oldMarker.userData = marker
              }
-         } else {
-             throw GoogleMapErrors.markerNotFound
-         }
          return marker.id!
      }
     
@@ -1029,79 +1102,190 @@ public class Map {
     }
 
     func addMarkers(markers: [Marker]) throws -> [Int] {
-         var markerHashes: [Int] = []
-        var flag = true
-        var markersNew = [removeArrayClass]()
-       try self.removeMarkersArray.forEach { marker in
-             if((markers.first{$0.id == marker.id}) != nil){
-                 let element = markers.first{$0.id == marker.id}
-                 var data = try setMarkerPositionNew(marker: element!)
-                 markersNew.insert(marker, at: 0)
-                 self.removeMarkersArray.removeAll{$0.id == marker.id}
-             }
-        }
+        var markerHashes: [Int] = []
+
+        let newMarkerIds = Set(markers.compactMap { $0.id })
         
-        if(flag){
-               if(!self.removeMarkersArray.isEmpty){
-                  flag = false
-                  try removeMarkers(ids: self.removeMarkersArray.map{$0.keyValue})
-                  self.removeMarkersArray = []
-               }
-          }
-        
-        if(!markersNew.isEmpty){
-            markersNew.forEach{marker in
-                self.removeMarkersArray.insert(marker, at: 0)
+        // Phase 1: Remove stale markers (on map but not in new list)
+        let markersToRemove = self.removeMarkersArray.filter { !newMarkerIds.contains($0.id) }
+        if !markersToRemove.isEmpty {
+            do {
+                try removeMarkers(ids: markersToRemove.map { $0.keyValue })
+            } catch {
+                NSLog("CapacitorGoogleMaps: Error removing stale markers: \(error)")
             }
         }
-        
-         DispatchQueue.main.sync {
-             var googleMapsMarkers: [GMSMarker] = []
-             markers.forEach { marker in
-                 if(marker.title != "" || (marker.skipTitle == true)){
-                 if((markersNew.first{$0.id == marker.id}) == nil ){
-                 var newMarker = GMSMarker()
-                      if marker.secondaryImageUrl == nil {
-                          newMarker = BusesAroundYou(title: marker.title!,coordinate: marker.coordinate)
-                     }
-                     else{
-                         newMarker = GMSMarker();
-                         newMarker.position = CLLocationCoordinate2D(latitude: marker.coordinate.lat, longitude: marker.coordinate.lng)
-                         if(marker.skipTitle != true){
-                             newMarker.title = marker.title
-                         }
-                         if let customAnchor = marker.customAnchor{
-                             newMarker.groundAnchor = customAnchor
-                         }
-//                         newMarker.groundAnchor = CGPoint(x: 0.5, y: 0.5)
-                     }
-                 newMarker.snippet = marker.snippet
-                 newMarker.isFlat = marker.isFlat ?? false
-                 newMarker.opacity = marker.opacity ?? 1
-                 newMarker.isDraggable = marker.draggable ?? false
-                 if let iconUrl = marker.iconUrl, iconUrl.contains("new_3d_marker") {
-                     renderDynamicMarker(gmsMarker: newMarker, markerData: marker)
-                 } else {
-                     newMarker.icon = UIImage(named: marker.iconUrl ?? "")
-                 }
+        self.removeMarkersArray.removeAll { !newMarkerIds.contains($0.id) }
 
-                 if self.mapViewController.clusteringEnabled {
-                     googleMapsMarkers.append(newMarker)
-                 } else {
-                     newMarker.map = self.mapViewController.GMapView
-                 }
+        // Phase 2: Update existing markers' positions
+        var existingMarkerIds = Set<String>()
+        for marker in markers {
+            guard let markerId = marker.id else { continue }
+            if self.markerIdOnWeb[markerId] != nil {
+                existingMarkerIds.insert(markerId)
+                _ = try setMarkerPositionNew(marker: marker)
+            }
+        }
 
-                 self.markers[newMarker.hash.hashValue] = newMarker
-                 markerHashes.append(newMarker.hash.hashValue)
-                     self.removeMarkersArray.append(removeArrayClass(id: marker.id!, keyValue: newMarker.hash.hashValue))
-             }
-                 }
-             }
+        // Phase 3: Add new markers
+        DispatchQueue.main.sync {
+            var googleMapsMarkers: [GMSMarker] = []
+            markers.forEach { marker in
+                guard let markerId = marker.id else { return }
+                // Skip markers that already exist (updated in phase 2)
+                if existingMarkerIds.contains(markerId) {
+                    if let hash = self.markerIdOnWeb[markerId] {
+                        markerHashes.append(hash)
+                    }
+                    return
+                }
 
-             if self.mapViewController.clusteringEnabled {
-                 self.mapViewController.addMarkersToCluster(markers: googleMapsMarkers)
-             }
-         }
+                let newMarker = GMSMarker()
+                newMarker.position = CLLocationCoordinate2D(latitude: marker.coordinate.lat, longitude: marker.coordinate.lng)
+                if let customAnchor = marker.customAnchor {
+                    newMarker.groundAnchor = customAnchor
+                }
+                if !(marker.title ?? "").isEmpty {
+                    newMarker.title = marker.title
+                }
+                if !(marker.snippet ?? "").isEmpty {
+                    newMarker.snippet = marker.snippet
+                }
+                newMarker.userData = marker
+
+                // Info window handling
+                if let infoIcon = marker.infoIcon, let mapView = self.mapViewController.GMapView, !infoIcon.contains("not_show_info_window"), !infoIcon.contains("multiple_info_window") {
+                    newMarker.map = mapView
+                    if infoIcon.contains("address") {
+                        fetchAddressForMarker(newMarker)
+                    }
+                    if infoIcon.contains("bus_alert_info") {
+                        mapView.selectedMarker = newMarker
+                    }
+                    if infoIcon.contains("last_updated_info") {
+                        mapView.selectedMarker = newMarker
+                    }
+                }
+                if let infoIcon = marker.infoIcon, infoIcon.contains("not_show_info_window"), infoIcon.contains("multiple_info_window") {
+                    newMarker.title = ""
+                    newMarker.snippet = ""
+                }
+                if let infoIcon = marker.infoIcon, infoIcon.contains("multiple_info_window") {
+                    newMarker.title = ""
+                    newMarker.snippet = ""
+                }
+
+                newMarker.isFlat = marker.isFlat ?? false
+                newMarker.opacity = marker.opacity ?? 1
+                newMarker.isDraggable = marker.draggable ?? false
+
+                // Icon handling — full parity with addMarker
+                if (marker.iconUrl ?? "").isEmpty {
+                    newMarker.opacity = 0.0
+                    newMarker.map = self.mapViewController.GMapView
+                    self.mapViewController.GMapView.selectedMarker = newMarker
+                } else {
+                    if let iconUrl = marker.iconUrl, iconUrl.contains("buses_custom_marker") {
+                        let busesMarker = BusesMarkers.instanceFromNib()
+                        busesMarker.BusNumberMarkerText.text = marker.title
+                        busesMarker.updateCardColorBasedOnIconUrl(iconUrl: marker.iconUrl)
+                        newMarker.iconView = busesMarker
+                    } else if let iconUrl = marker.iconUrl, iconUrl.contains("alert_custom_marker") {
+                        if iconUrl.contains("halt") {
+                            let alertMarker = AlertBusMarkerHalt.instanceFromNib()
+                            alertMarker.BusNumberText.text = marker.title
+                            alertMarker.AlertSnippet.text = marker.snippet
+                            if iconUrl.contains("ignition_off") {
+                                alertMarker.IgnitionImage.image = UIImage(named: "alert_ignition_off")
+                            } else if iconUrl.contains("ignition_on") {
+                                alertMarker.IgnitionImage.image = UIImage(named: "alert_ignition_on")
+                            } else {
+                                alertMarker.IgnitionImage.image = nil
+                            }
+                            newMarker.iconView = alertMarker
+                        } else {
+                            let alertMarker = AlertBusMarkerInactive.instanceFromNib()
+                            alertMarker.BusNumberText.text = marker.title
+                            alertMarker.AlertSnippet.text = marker.snippet
+                            newMarker.iconView = alertMarker
+                        }
+                        newMarker.title = ""
+                        newMarker.snippet = ""
+                    } else if let iconUrl = marker.iconUrl, iconUrl.contains("alert_stop_custom_marker") {
+                        let alertMarker = AlertStopMarker.instanceFromNib()
+                        alertMarker.alertTitle.text = marker.title
+                        alertMarker.alertSnippet.text = marker.snippet
+                        newMarker.iconView = alertMarker
+                        newMarker.title = ""
+                        newMarker.snippet = ""
+                    } else if let iconUrl = marker.iconUrl, iconUrl.contains("overspeed_marker") {
+                        let alertMarker = OverSpeedMarker.instanceFromNib()
+                        alertMarker.alertTitle.text = marker.title
+                        alertMarker.alertSnippet.text = marker.snippet
+                        newMarker.iconView = alertMarker
+                        newMarker.title = ""
+                        newMarker.snippet = ""
+                    } else if let iconUrl = marker.iconUrl, iconUrl.contains("new_3d_marker") {
+                        renderDynamicMarker(gmsMarker: newMarker, markerData: marker)
+                    } else if let iconUrl = marker.iconUrl, iconUrl.contains("route_name") {
+                        let routeNameMarker = RouteNameMarker.instanceFromNib()
+                        let routeName = marker.title ?? ""
+                        routeNameMarker.configure(with: routeName)
+                        routeNameMarker.sizeToFit()
+                        newMarker.iconView = routeNameMarker
+                        newMarker.title = ""
+                        newMarker.snippet = ""
+                    } else {
+                        if let iconUrl = marker.iconUrl {
+                            newMarker.icon = self.getCachedResizedIcon(iconUrl, marker)
+                        }
+                    }
+                }
+
+                // Rotation handling
+                do {
+                    if (marker.rotation) == 1 {
+                        if let angleDiff = marker.angleDiff {
+                            newMarker.rotation = angleDiff != 0 ? angleDiff : try getAngle(marker: marker)
+                        } else {
+                            newMarker.rotation = try getAngle(marker: marker)
+                        }
+                    } else {
+                        newMarker.rotation = 0
+                    }
+                } catch {
+                    NSLog("Error in angle. \(error)")
+                }
+
+                // zIndex
+                if marker.zIndex != nil {
+                    newMarker.zIndex = marker.zIndex ?? 1
+                }
+
+                // Clustering / map assignment
+                if self.mapViewController.clusteringEnabled && (marker.isClustered ?? true) {
+                    if (marker.isClustered ?? true) {
+                        googleMapsMarkers.append(newMarker)
+                    } else {
+                        self.markerIdNotOnCluster.append(String(newMarker.hash.hashValue))
+                        newMarker.map = self.mapViewController.GMapView
+                    }
+                } else {
+                    newMarker.map = self.mapViewController.GMapView
+                }
+
+                self.markers[newMarker.hash.hashValue] = newMarker
+                self.markersDetails[newMarker.hash.hashValue] = marker
+                self.markerIdOnWeb[markerId] = newMarker.hash.hashValue
+                markerHashes.append(newMarker.hash.hashValue)
+                self.removeMarkersArray.append(removeArrayClass(id: markerId, keyValue: newMarker.hash.hashValue))
+            }
+
+            // Cluster all at once (performance optimization)
+            if self.mapViewController.clusteringEnabled && !googleMapsMarkers.isEmpty {
+                self.mapViewController.addMarkersToCluster(markers: googleMapsMarkers)
+            }
+        }
         return markerHashes
     }
 
@@ -1156,7 +1340,7 @@ public class Map {
     //     return polylineHashes
     // }
 
-    func addPolyline(cords: [LatLng], strokeWidth: Double, strokeColor: String, strokeOpacity:Double ) throws -> [Int] {
+    func addPolyline(cords: [LatLng], strokeWidth: Double, strokeColor: String, strokeOpacity:Double, lineDashLength: Double = 0, lineDashGap: Double = 0 ) throws -> [Int] {
         var polylineHashes: [Int] = []
 
         DispatchQueue.main.sync {
@@ -1172,6 +1356,13 @@ public class Map {
                 newPolyline.map = self.mapViewController.GMapView
                 newPolyline.strokeWidth = strokeWidth
                 newPolyline.strokeColor = .black
+
+                // Apply dashed pattern if lineDashLength > 0
+                if lineDashLength > 0 && lineDashGap > 0 {
+                    let solidStyle = GMSStrokeStyle.solidColor(newPolyline.strokeColor ?? .black)
+                    let clearStyle = GMSStrokeStyle.solidColor(.clear)
+                    newPolyline.spans = GMSStyleSpans(path, [solidStyle, clearStyle], [NSNumber(value: lineDashLength), NSNumber(value: lineDashGap)], .rhumb)
+                }
 
                 polylineHashes.append(newPolyline.hash.hashValue)
             let startCord = CLLocation(latitude: cords[0].lat, longitude: cords[0].lng)
@@ -1200,7 +1391,7 @@ public class Map {
         return polylineHashes
     }
 
-    func addPolylines(polylines:[[LatLng]],strokeColors: [String], strokeWidths: [Double], zIndexs: [Double], strokeOpacities:[Double] ) throws -> [Int] {
+    func addPolylines(polylines:[[LatLng]],strokeColors: [String], strokeWidths: [Double], zIndexs: [Double], strokeOpacities:[Double], lineDashLengths: [Double] = [], lineDashGaps: [Double] = [] ) throws -> [Int] {
         var polylineHashes: [Int] = []
        
         DispatchQueue.main.sync {
@@ -1222,6 +1413,16 @@ public class Map {
                         newPolyline.strokeColor = strokeColor
                    }
                    newPolyline.zIndex = Int32(zIndexs[index])
+
+                   // Apply dashed pattern if lineDashLength > 0
+                   let dashLength = index < lineDashLengths.count ? lineDashLengths[index] : 0
+                   let dashGap = index < lineDashGaps.count ? lineDashGaps[index] : 0
+                   if dashLength > 0 && dashGap > 0 {
+                       let solidStyle = GMSStrokeStyle.solidColor(newPolyline.strokeColor ?? .black)
+                       let clearStyle = GMSStrokeStyle.solidColor(.clear)
+                       newPolyline.spans = GMSStyleSpans(path, [solidStyle, clearStyle], [NSNumber(value: dashLength), NSNumber(value: dashGap)], .rhumb)
+                   }
+
                    self.polylines[newPolyline.hash.hashValue] = newPolyline
                    polylineHashes.append(newPolyline.hash.hashValue)
             }
@@ -1463,17 +1664,28 @@ public class Map {
 
     func removeMarkers(ids: [Int]) throws {
         DispatchQueue.main.sync {
-            var markers: [GMSMarker] = []
+            var markersToRemoveFromCluster: [GMSMarker] = []
             ids.forEach { id in
                 if let marker = self.markers[id] {
                     marker.map = nil
                     self.markers.removeValue(forKey: id)
-                    markers.append(marker)
+                    self.markersDetails.removeValue(forKey: id)
+                    markersToRemoveFromCluster.append(marker)
+
+                    // Clean up info window if present
+                    if let infoView = self.infoWindowMarkers[id] {
+                        infoView.removeFromSuperview()
+                        self.infoWindowMarkers.removeValue(forKey: id)
+                    }
                 }
             }
 
-            if self.mapViewController.clusteringEnabled {
-                self.mapViewController.removeMarkersFromCluster(markers: markers)
+            // Clean up markerIdOnWeb entries pointing to removed hashes
+            let removedSet = Set(ids)
+            self.markerIdOnWeb = self.markerIdOnWeb.filter { !removedSet.contains($0.value) }
+
+            if self.mapViewController.clusteringEnabled && !markersToRemoveFromCluster.isEmpty {
+                self.mapViewController.removeMarkersFromCluster(markers: markersToRemoveFromCluster)
             }
         }
     }
@@ -1650,7 +1862,6 @@ public class Map {
     private func renderDynamicMarker(gmsMarker: GMSMarker, markerData: Marker) {
         if let iconUrl = markerData.iconUrl, iconUrl.contains("new_3d_marker") {
             gmsMarker.iconView = nil
-            let generator = DynamicMarkerGenerator()
 
             var statusColor = markerData.markerBgColor
             var bearingAngle = markerData.bearingAngle
@@ -1664,15 +1875,47 @@ public class Map {
                 }
             }
 
-            gmsMarker.icon = generator.generateMarker(
-                busImage: UIImage(named: "white_bus") ?? UIImage(),
-                statusColor: statusColor ?? .systemGreen,
-                angle: CGFloat(bearingAngle ?? 0)
-            )
-            gmsMarker.groundAnchor = generator.anchor()
+            let resolvedColor = statusColor ?? .systemGreen
+            let resolvedAngle = CGFloat(bearingAngle ?? 0)
+            // Quantize angle to 5-degree steps to reduce unique cache entries
+            let quantizedAngle = Int(round(resolvedAngle / 5.0)) * 5
+            let colorHex = resolvedColor.toHexString()
+            let cacheKey = "3d_\(colorHex)_\(quantizedAngle)"
+
+            if let cachedIcon = self.dynamicMarkerCache[cacheKey] {
+                gmsMarker.icon = cachedIcon
+            } else {
+                let generator = Map.dynamicMarkerGenerator
+                let icon = generator.generateMarker(
+                    busImage: UIImage(named: "white_bus") ?? UIImage(),
+                    statusColor: resolvedColor,
+                    angle: CGFloat(quantizedAngle)
+                )
+                self.dynamicMarkerCache[cacheKey] = icon
+                gmsMarker.icon = icon
+            }
+            gmsMarker.groundAnchor = Map.dynamicMarkerGenerator.anchor()
             gmsMarker.title = markerData.title
             gmsMarker.snippet = markerData.snippet
         }
+    }
+
+    private func getCachedResizedIcon(_ iconUrl: String, _ marker: Marker) -> UIImage? {
+        let sizeKey: String
+        if let iconSize = marker.iconSize {
+            sizeKey = "\(iconUrl)_\(Int(iconSize.width))x\(Int(iconSize.height))"
+        } else {
+            sizeKey = iconUrl
+        }
+        if let cached = self.resizedIconCache[sizeKey] {
+            return cached
+        }
+        guard let image = UIImage(named: iconUrl) else { return nil }
+        let resized = getResizedIcon(image, marker)
+        if let resized = resized {
+            self.resizedIconCache[sizeKey] = resized
+        }
+        return resized
     }
 }
 
@@ -1751,6 +1994,87 @@ extension UIImage {
         let resizedImage = UIGraphicsGetImageFromCurrentImageContext()!
         UIGraphicsEndImageContext()
         return resizedImage
+    }
+}
+
+// MARK: - MarkerAnimationHelper (CADisplayLink-based frame-by-frame animation)
+
+class MarkerAnimationHelper: NSObject {
+    private let startTime: CFTimeInterval
+    private let duration: Double
+    private let startLat: Double
+    private let startLng: Double
+    private let endLat: Double
+    private let endLng: Double
+    private weak var gmsMarker: GMSMarker?
+    private weak var infoWindowView: UIView?
+    private weak var mapView: GMSMapView?
+    private weak var map: Map?
+    private let markerHash: Int
+    private let hasSnippet: Bool
+    private let isReverse: Bool
+    private let zoomLevel: Float
+
+    init(startTime: CFTimeInterval, duration: Double,
+         startLat: Double, startLng: Double,
+         endLat: Double, endLng: Double,
+         gmsMarker: GMSMarker,
+         infoWindowView: UIView?,
+         mapView: GMSMapView?,
+         map: Map,
+         markerHash: Int,
+         hasSnippet: Bool,
+         isReverse: Bool,
+         zoomLevel: Float) {
+        self.startTime = startTime
+        self.duration = duration
+        self.startLat = startLat
+        self.startLng = startLng
+        self.endLat = endLat
+        self.endLng = endLng
+        self.gmsMarker = gmsMarker
+        self.infoWindowView = infoWindowView
+        self.mapView = mapView
+        self.map = map
+        self.markerHash = markerHash
+        self.hasSnippet = hasSnippet
+        self.isReverse = isReverse
+        self.zoomLevel = zoomLevel
+    }
+
+    @objc func step(_ displayLink: CADisplayLink) {
+        guard let gmsMarker = gmsMarker else {
+            displayLink.invalidate()
+            return
+        }
+
+        let elapsed = CACurrentMediaTime() - startTime
+        let fraction = min(elapsed / duration, 1.0)
+
+        let lat = startLat + (endLat - startLat) * fraction
+        let lng = startLng + (endLng - startLng) * fraction
+        let newPosition = CLLocationCoordinate2D(latitude: lat, longitude: lng)
+
+        gmsMarker.position = newPosition
+
+        // Update info window position on every frame
+        if let infoWindowView = infoWindowView, let mapView = mapView, let map = map {
+            let currentZoom = mapView.camera.zoom
+            if currentZoom >= zoomLevel {
+                let screenPos = map.calculateInfoWindowScreenPosition(
+                    for: newPosition,
+                    markerId: markerHash,
+                    isSnippet: hasSnippet,
+                    isReverseInfoWindow: isReverse
+                )
+                infoWindowView.frame.origin = screenPos
+                infoWindowView.isHidden = false
+            }
+        }
+
+        if fraction >= 1.0 {
+            displayLink.invalidate()
+        }
     }
 }
 

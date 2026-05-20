@@ -66,6 +66,8 @@
 		EEC1D56C2EBF2D0300A51034 /* StopArrivalInfoWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEC1D56B2EBF2D0300A51034 /* StopArrivalInfoWindow.swift */; };
 		EEC1D56E2EBF2D6C00A51034 /* StopArrivalInfoWindow.xib in Resources */ = {isa = PBXBuildFile; fileRef = EEC1D56D2EBF2D6C00A51034 /* StopArrivalInfoWindow.xib */; };
 		FAC57A9F2F29057600FED7B3 /* DynamicMarker.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC57A9E2F29057600FED7B3 /* DynamicMarker.swift */; };
+		FAE6511F2F6566EC004AE4CD /* RouteNameMarker.xib in Resources */ = {isa = PBXBuildFile; fileRef = FAE6511E2F6566EC004AE4CD /* RouteNameMarker.xib */; };
+		FAE651232F65671C004AE4CD /* RouteNameMarker.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAE651222F65671C004AE4CD /* RouteNameMarker.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -147,6 +149,8 @@
 		F65BB2953ECE002E1EF3E424 /* Pods-PluginTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-PluginTests.release.xcconfig"; path = "Pods/Target Support Files/Pods-PluginTests/Pods-PluginTests.release.xcconfig"; sourceTree = "<group>"; };
 		F6753A823D3815DB436415E3 /* Pods_PluginTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_PluginTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		FAC57A9E2F29057600FED7B3 /* DynamicMarker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicMarker.swift; sourceTree = "<group>"; };
+		FAE6511E2F6566EC004AE4CD /* RouteNameMarker.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; path = RouteNameMarker.xib; sourceTree = "<group>"; };
+		FAE651222F65671C004AE4CD /* RouteNameMarker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteNameMarker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -289,6 +293,8 @@
 				EC11CB3F2BC92C6B00310392 /* mapStyle.json */,
 				EEC1D56B2EBF2D0300A51034 /* StopArrivalInfoWindow.swift */,
 				EEC1D56D2EBF2D6C00A51034 /* StopArrivalInfoWindow.xib */,
+				FAE6511E2F6566EC004AE4CD /* RouteNameMarker.xib */,
+				FAE651222F65671C004AE4CD /* RouteNameMarker.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -404,6 +410,7 @@
 			files = (
 				EC578B872BCD4157000C9339 /* BusesMarkerInfoWindow.xib in Resources */,
 				EC9AB75E2D12C65E007314B3 /* HistoryReplayInfoWindow.xib in Resources */,
+				FAE6511F2F6566EC004AE4CD /* RouteNameMarker.xib in Resources */,
 				EC3BE86F2BCE59CB00158F2C /* BusesMarkers.xib in Resources */,
 				EC11CB452BC92C6B00310392 /* infoWindowBackground.xib in Resources */,
 				EC3BE8732BCE697B00158F2C /* notosans.ttf in Resources */,
@@ -551,6 +558,7 @@
 				0238AED727C931A40012930B /* GoogleMapCameraConfig.swift in Sources */,
 				0238AED927C945840012930B /* GoogleMapPadding.swift in Sources */,
 				02404C8F279F43E900CEF8C8 /* GoogleMapConfig.swift in Sources */,
+				FAE651232F65671C004AE4CD /* RouteNameMarker.swift in Sources */,
 				EC1FC3EE2C09CC22006AA7E4 /* AlertMarkerInfoWindow.swift in Sources */,
 				EC11CB492BC92C6B00310392 /* infoWindow.swift in Sources */,
 				EC11CB502BC92C6B00310392 /* InfoWindowWithImage.swift in Sources */,
