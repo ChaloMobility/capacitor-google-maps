@@ -3,10 +3,13 @@ package com.capacitorjs.plugins.googlemaps
 import BusesMarker
 import android.content.Context
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.Marker
 import com.google.android.gms.maps.model.MarkerOptions
+import com.google.maps.android.clustering.Cluster
 import com.google.maps.android.clustering.ClusterManager
 import com.google.maps.android.clustering.view.DefaultClusterRenderer
 
@@ -15,8 +18,39 @@ class CustomClusterManagerRenderer(
     private val map: GoogleMap,
     clusterManager: ClusterManager<CapacitorGoogleMapMarker>
 ) : DefaultClusterRenderer<CapacitorGoogleMapMarker>(context, map, clusterManager) {
+    interface ClusterRenderListener {
+        fun onClusterRenderPassStarted(generation: Int, expectedRenderedItemKeys: Set<String>)
+        fun onClusterRenderPassSettled(generation: Int, expectedRenderedItemKeys: Set<String>)
+    }
 
     private val clusterColor = Color.parseColor("#FE7C00")
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var clusterRenderListener: ClusterRenderListener? = null
+    private var renderGeneration: Int = 0
+    private var currentExpectedRenderedItemKeys: Set<String> = emptySet()
+    private val renderedItemKeysForPass = mutableSetOf<String>()
+    private var settleRunnable: Runnable? = null
+
+    fun setClusterRenderListener(listener: ClusterRenderListener?) {
+        clusterRenderListener = listener
+    }
+
+    override fun onClustersChanged(clusters: Set<Cluster<CapacitorGoogleMapMarker>>) {
+        renderGeneration += 1
+        renderedItemKeysForPass.clear()
+        currentExpectedRenderedItemKeys = clusters
+            .filter { it.size == 1 }
+            .flatMap { cluster -> cluster.items.map(::getClusterItemKey) }
+            .toSet()
+
+        clusterRenderListener?.onClusterRenderPassStarted(
+            renderGeneration,
+            currentExpectedRenderedItemKeys
+        )
+
+        super.onClustersChanged(clusters)
+        scheduleSettleCheck(renderGeneration)
+    }
 
     override fun onBeforeClusterItemRendered(item: CapacitorGoogleMapMarker, markerOptions: MarkerOptions) {
         val iconUrl = item.iconUrl
@@ -110,11 +144,13 @@ class CustomClusterManagerRenderer(
         super.onClusterItemRendered(item, marker)
         marker.tag = item
         item.googleMapMarker = marker
+        markClusterItemRendered(item)
     }
 
     override fun onClusterItemUpdated(item: CapacitorGoogleMapMarker, marker: Marker) {
         marker.tag = item
         item.googleMapMarker = marker
+        markClusterItemRendered(item)
 
         if (item.infoData?.optBoolean("showInfoIcon") == true) {
             marker.showInfoWindow()
@@ -180,5 +216,40 @@ class CustomClusterManagerRenderer(
 
     override fun getColor(clusterSize: Int): Int {
         return clusterColor
+    }
+
+    private fun markClusterItemRendered(item: CapacitorGoogleMapMarker) {
+        val itemKey = getClusterItemKey(item)
+        if (!currentExpectedRenderedItemKeys.contains(itemKey)) {
+            return
+        }
+
+        renderedItemKeysForPass.add(itemKey)
+        scheduleSettleCheck(renderGeneration)
+    }
+
+    private fun scheduleSettleCheck(generation: Int) {
+        settleRunnable?.let(mainHandler::removeCallbacks)
+
+        val runnable = Runnable {
+            if (generation != renderGeneration) {
+                return@Runnable
+            }
+
+            if (renderedItemKeysForPass.containsAll(currentExpectedRenderedItemKeys)) {
+                clusterRenderListener?.onClusterRenderPassSettled(
+                    generation,
+                    currentExpectedRenderedItemKeys
+                )
+            }
+        }
+
+        settleRunnable = runnable
+        mainHandler.post(runnable)
+    }
+
+    private fun getClusterItemKey(item: CapacitorGoogleMapMarker): String {
+        return item.getMarkerId()
+            ?: "${item.position.latitude}:${item.position.longitude}:${item.title}:${item.snippet}"
     }
 }

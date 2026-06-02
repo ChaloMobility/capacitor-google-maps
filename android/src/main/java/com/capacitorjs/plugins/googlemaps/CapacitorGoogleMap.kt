@@ -13,9 +13,6 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.location.Geocoder
 import android.location.Location
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
 import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
@@ -73,6 +70,7 @@ class CapacitorGoogleMap(
     private var multipleInfoWindowZoomLevel: Float = 13.5f
     private lateinit var multipleInfoWindowView: MultipleInfoWindowView
     private var clusterManager: ClusterManager<CapacitorGoogleMapMarker>? = null
+    private var customClusterRenderer: CustomClusterManagerRenderer? = null
     private var markerIdOnWeb = ArrayList<String>()
     private var markerIdNotOnCluster = ArrayList<String>()
     private var animator: Animator? = null
@@ -81,6 +79,33 @@ class CapacitorGoogleMap(
     private val isReadyChannel = Channel<Boolean>()
     private var debounceJob: Job? = null
     private var infoWindowUpdateJob: Job? = null
+    private var clusterRenderFallbackJob: Job? = null
+    private var pendingInfoWindowRefreshToken: Long = 0
+    private var pendingRefreshMinimumGeneration: Int = 0
+    private var clusterRenderGeneration: Int = 0
+    private var clusterSettledGeneration: Int = 0
+    private var clusterRenderInProgress: Boolean = false
+
+    private val clusterRenderListener = object : CustomClusterManagerRenderer.ClusterRenderListener {
+        override fun onClusterRenderPassStarted(
+            generation: Int,
+            expectedRenderedItemKeys: Set<String>
+        ) {
+            clusterRenderGeneration = generation
+            clusterRenderInProgress = true
+        }
+
+        override fun onClusterRenderPassSettled(
+            generation: Int,
+            expectedRenderedItemKeys: Set<String>
+        ) {
+            clusterSettledGeneration = generation
+            if (generation >= clusterRenderGeneration) {
+                clusterRenderInProgress = false
+            }
+            flushPendingInfoWindowRefresh()
+        }
+    }
 
     init {
         val bridge = delegate.bridge
@@ -204,6 +229,13 @@ class CapacitorGoogleMap(
                     if (null != viewToRemove) {
                         ((bridge.webView.parent) as ViewGroup).removeView(viewToRemove)
                     }
+                    customClusterRenderer?.setClusterRenderListener(null)
+                    customClusterRenderer = null
+                    clusterRenderFallbackJob?.cancel()
+                    debounceJob?.cancel()
+                    infoWindowUpdateJob?.cancel()
+                    pendingInfoWindowRefreshToken = 0
+                    clusterRenderInProgress = false
                     mapView.onDestroy()
                     googleMap = null
                     clusterManager = null
@@ -413,15 +445,11 @@ class CapacitorGoogleMap(
 
                     // Cluster once after all markers are added (outside the loop)
                     if (clusterManager != null) {
-                        clusterManager?.cluster()
+                        requestClusteredInfoWindowRefresh()
+                    } else {
+                        // No clustering, update immediately
+                        updateInfoWindowsForCurrentZoom()
                     }
-
-                    // cluster() schedules rendering asynchronously; wait for the renderer to finish
-                    // before checking which markers are rendered individually.
-                    delay(300)
-
-                    // Update info windows so unclustered markers get their info windows immediately
-                    updateInfoWindowsForCurrentZoom()
 
                     callback(Result.success(markerIds))
                 } catch (e: Exception) {
@@ -671,7 +699,7 @@ class CapacitorGoogleMap(
                         }
                         googleMapMarker?.remove()
                         clusterManager?.addItem(marker)
-                        clusterManager?.cluster()
+                        requestClusteredInfoWindowRefresh()
                     }
 
                     markers[googleMapMarker!!.id] = marker
@@ -739,6 +767,100 @@ class CapacitorGoogleMap(
     private fun getRenderedMarker(item: CapacitorGoogleMapMarker): Marker? {
         val renderer = clusterManager?.renderer as? DefaultClusterRenderer<CapacitorGoogleMapMarker>
         return renderer?.getMarker(item)
+    }
+
+    private fun requestClusteredInfoWindowRefresh() {
+        if (clusterManager == null) {
+            updateInfoWindowsForCurrentZoom()
+            return
+        }
+
+        requestInfoWindowRefreshAfterClusterSettle(forceWaitForNextPass = true)
+        clusterManager?.cluster()
+    }
+
+    private fun requestInfoWindowRefreshAfterClusterSettle(forceWaitForNextPass: Boolean = false) {
+        if (clusterManager == null) {
+            updateInfoWindowsForCurrentZoom()
+            return
+        }
+
+        pendingInfoWindowRefreshToken += 1
+        val requestToken = pendingInfoWindowRefreshToken
+
+        eagerCleanupInfoWindowsForPendingRefresh()
+
+        pendingRefreshMinimumGeneration = if (forceWaitForNextPass) {
+            clusterRenderGeneration + 1
+        } else {
+            clusterRenderGeneration
+        }
+
+        if (!forceWaitForNextPass &&
+            !clusterRenderInProgress &&
+            clusterSettledGeneration >= pendingRefreshMinimumGeneration
+        ) {
+            flushPendingInfoWindowRefresh()
+            return
+        }
+
+        clusterRenderFallbackJob?.cancel()
+        clusterRenderFallbackJob = CoroutineScope(Dispatchers.Main).launch {
+            delay(250)
+            if (pendingInfoWindowRefreshToken != requestToken) {
+                return@launch
+            }
+
+            pendingInfoWindowRefreshToken = 0
+            updateInfoWindowsForCurrentZoom()
+        }
+    }
+
+    private fun flushPendingInfoWindowRefresh() {
+        if (pendingInfoWindowRefreshToken == 0L) {
+            return
+        }
+
+        if (clusterRenderInProgress) {
+            return
+        }
+
+        if (clusterSettledGeneration < pendingRefreshMinimumGeneration) {
+            return
+        }
+
+        pendingInfoWindowRefreshToken = 0
+        clusterRenderFallbackJob?.cancel()
+        updateInfoWindowsForCurrentZoom()
+    }
+
+    private fun eagerCleanupInfoWindowsForPendingRefresh() {
+        val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+        if (currentZoom < multipleInfoWindowZoomLevel) {
+            hideAllMultipleInfoWindows()
+            return
+        }
+
+        val markersToRemove = mutableListOf<String>()
+        infoWindowMarkers.forEach { (originalMarkerId, infoWindowMarker) ->
+            val marker = markers[originalMarkerId]
+                ?: markers.values.firstOrNull {
+                    it.getMarkerId() == originalMarkerId || it.googleMapMarker?.id == originalMarkerId
+                }
+
+            val visibleMarker = when {
+                marker == null -> null
+                clusterManager != null && marker.isClustered -> getRenderedMarker(marker)
+                else -> marker.googleMapMarker
+            }
+
+            if (marker == null || visibleMarker == null || !visibleMarker.isVisible) {
+                markersToRemove.add(originalMarkerId)
+                infoWindowMarker.remove()
+            }
+        }
+
+        markersToRemove.forEach { infoWindowMarkers.remove(it) }
     }
 
     private fun getInfoWindowKey(item: CapacitorGoogleMapMarker, visibleMarker: Marker? = null): String {
@@ -888,7 +1010,7 @@ class CapacitorGoogleMap(
         valueAnimator.addListener(object : AnimatorListenerAdapter() {
             override fun onAnimationEnd(animation: Animator) {
                 // At the end of the animation, re-cluster if necessary
-                clusterManager?.cluster()
+                requestClusteredInfoWindowRefresh()
             }
         })
         valueAnimator.start()
@@ -945,7 +1067,7 @@ class CapacitorGoogleMap(
 
                         oldMarker?.googleMapMarker?.remove()
                         clusterManager?.addItem(oldMarker)
-                        clusterManager?.cluster()
+                        requestClusteredInfoWindowRefresh()
                         markerIdNotOnCluster.remove(marker.id)
 
                     } else if(!markerIdNotOnCluster.contains(marker.id) && !marker.isClustered) {
@@ -953,7 +1075,7 @@ class CapacitorGoogleMap(
                         // this marker wants to the be remove from cluster
 
                         clusterManager?.removeItem(oldMarker)
-                        clusterManager?.cluster()
+                        requestClusteredInfoWindowRefresh()
                         val googleMapMarker = googleMap?.addMarker(oldMarker!!.getMarkerOptionsUpdated())
                         oldMarker?.googleMapMarker = googleMapMarker
                         marker.id?.let { markerIdNotOnCluster.add(it) }
@@ -1055,7 +1177,7 @@ class CapacitorGoogleMap(
 //                              Remove and re-add the marker to the ClusterManager.
                             clusterManager?.removeItem(it)
                             clusterManager?.addItem(it)
-                            clusterManager?.cluster()
+                            requestClusteredInfoWindowRefresh()
 
 
                         }
@@ -1271,7 +1393,9 @@ class CapacitorGoogleMap(
             CoroutineScope(Dispatchers.Main).launch {
                 val bridge = delegate.bridge
                 clusterManager = ClusterManager(bridge.context, googleMap)
-                clusterManager!!.renderer = CustomClusterManagerRenderer(bridge.context, googleMap!!, clusterManager!!)
+                customClusterRenderer = CustomClusterManagerRenderer(bridge.context, googleMap!!, clusterManager!!)
+                customClusterRenderer?.setClusterRenderListener(clusterRenderListener)
+                clusterManager!!.renderer = customClusterRenderer
 
 
 
@@ -1298,7 +1422,7 @@ class CapacitorGoogleMap(
                     }
 
                     clusterManager?.addItems(filteredMarkers)
-                    clusterManager?.cluster()
+                    requestClusteredInfoWindowRefresh()
                 }
 
 
@@ -1315,8 +1439,15 @@ class CapacitorGoogleMap(
             googleMap ?: throw GoogleMapNotAvailable()
 
             CoroutineScope(Dispatchers.Main).launch {
+                customClusterRenderer?.setClusterRenderListener(null)
+                clusterRenderFallbackJob?.cancel()
+                pendingInfoWindowRefreshToken = 0
+                clusterRenderInProgress = false
+                clusterRenderGeneration = 0
+                clusterSettledGeneration = 0
                 clusterManager?.clearItems()
                 clusterManager?.cluster()
+                customClusterRenderer = null
                 clusterManager = null
 
                 googleMap?.setOnMarkerClickListener(this@CapacitorGoogleMap)
@@ -1359,7 +1490,11 @@ class CapacitorGoogleMap(
         try {
             CoroutineScope(Dispatchers.Main).launch {
                 multipleInfoWindowZoomLevel = zoomLevel
-                updateInfoWindowsForCurrentZoom()
+                if (clusterManager != null) {
+                    requestInfoWindowRefreshAfterClusterSettle()
+                } else {
+                    updateInfoWindowsForCurrentZoom()
+                }
                 callback(null)
             }
         } catch (e: GoogleMapsError) {
@@ -1382,7 +1517,7 @@ class CapacitorGoogleMap(
                 removeInfoWindowMarker(getInfoWindowKey(marker, marker.googleMapMarker))
                 if (clusterManager != null) {
                     clusterManager?.removeItem(marker)
-                    clusterManager?.cluster()
+                    requestClusteredInfoWindowRefresh()
                 }
 
                 marker.googleMapMarker?.remove()
@@ -1415,7 +1550,7 @@ class CapacitorGoogleMap(
 
                 if (clusterManager != null) {
                     clusterManager?.removeItems(deletedMarkers)
-                    clusterManager?.cluster()
+                    requestClusteredInfoWindowRefresh()
                 }
 
                 callback(null)
@@ -2093,7 +2228,12 @@ class CapacitorGoogleMap(
         data.put("zoom", this@CapacitorGoogleMap.googleMap?.cameraPosition?.zoom)
         delegate.notify("onCameraIdle", data)
         delegate.notify("onBoundsChanged", data)
-        updateInfoWindowsForCurrentZoom()
+
+        if (clusterManager != null) {
+            requestInfoWindowRefreshAfterClusterSettle(forceWaitForNextPass = true)
+        } else {
+            updateInfoWindowsForCurrentZoom()
+        }
     }
 
     override fun onCameraMoveStarted(reason: Int) {
@@ -2115,23 +2255,27 @@ class CapacitorGoogleMap(
     }
 
     override fun onCameraMove() {
+        val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
+        
+        // FIX: Immediately remove info windows during camera movement to prevent
+        // them from being visible while their markers are being clustered.
+        // This solves Issue 2 where info windows persist during cluster transitions.
+        if (currentZoom < multipleInfoWindowZoomLevel) {
+            infoWindowMarkers.values.forEach { it.remove() }
+            infoWindowMarkers.clear()
+        }
+        
         debounceJob?.cancel()
         debounceJob = CoroutineScope(Dispatchers.Main).launch {
-            delay(150)
-            clusterManager?.cluster()
-            cleanupStaleInfoWindows()
-            // Only hide info windows during active gesture; creation deferred to onCameraIdle
-            val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
-            if (currentZoom < multipleInfoWindowZoomLevel) {
-                hideAllMultipleInfoWindows()
-            }
+            delay(50)
+            requestClusteredInfoWindowRefresh()
         }
     }
     private fun updateInfoWindowsForCurrentZoom() {
         // Debounce rapid calls (camera idle, addMarkers, setMultipleInfoWindowZoomLevel, etc.)
         infoWindowUpdateJob?.cancel()
         infoWindowUpdateJob = CoroutineScope(Dispatchers.Main).launch {
-            delay(100)
+            // FIX: No delay needed - caller already ensures clustering has completed
             val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
             val shouldShowInfoWindows = currentZoom >= multipleInfoWindowZoomLevel
 
@@ -2141,6 +2285,7 @@ class CapacitorGoogleMap(
             if (shouldShowInfoWindows) {
                 showAllMultipleInfoWindows()
             } else {
+                // Info windows already removed in onCameraMove, but ensure cleanup
                 hideAllMultipleInfoWindows()
             }
         }
@@ -2200,7 +2345,9 @@ class CapacitorGoogleMap(
                 } else {
                     marker.googleMapMarker
                 }
-                if (visibleMarker != null) {
+                // FIX: Only add candidate if we have a valid visible marker
+                // This prevents creating info windows for markers that are clustered
+                if (visibleMarker != null && visibleMarker.isVisible) {
                     candidates.add(InfoWindowCandidate(marker, visibleMarker))
                 }
             }
@@ -2223,6 +2370,21 @@ class CapacitorGoogleMap(
             // Add all info window markers in one batch on Main thread
             for ((candidate, bitmap) in bitmapResults) {
                 val gmMarker = candidate.visibleMarker
+                
+                // FIX: Re-validate marker is still visible and not clustered before creating info window
+                // This prevents Issue 1 (wrong position) and Issue 2 (persists when clustered)
+                if (!gmMarker.isVisible) continue
+                
+                // FIX: For clustered markers, verify they're STILL rendered individually
+                // This catches the case where marker became clustered during bitmap creation
+                if (candidate.marker.isClustered) {
+                    val currentRenderedMarker = getRenderedMarker(candidate.marker)
+                    if (currentRenderedMarker == null || currentRenderedMarker.id != gmMarker.id) {
+                        // Marker became clustered or is no longer the same instance
+                        continue
+                    }
+                }
+                
                 val infoWindowKey = getInfoWindowKey(candidate.marker, gmMarker)
                 // Skip if already created (by a concurrent path)
                 if (infoWindowMarkers.containsKey(infoWindowKey)) {
