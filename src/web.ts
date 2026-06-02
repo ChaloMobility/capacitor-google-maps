@@ -100,6 +100,10 @@ export class CapacitorGoogleMapsWeb
       size: cluster.count,
       items: items,
     });
+
+    if (cluster.bounds) {
+      map.fitBounds(cluster.bounds);
+    }
   };
 
   private getIdFromMap(map: google.maps.Map): string {

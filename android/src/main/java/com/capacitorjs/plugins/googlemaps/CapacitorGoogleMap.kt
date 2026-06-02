@@ -1869,10 +1869,11 @@ class CapacitorGoogleMap(
             clusterManager?.setOnClusterClickListener {
                 val data = this@CapacitorGoogleMap.getClusterData(it)
                 googleMap?.let { map ->
-                    val currentZoom = map.cameraPosition.zoom
-                    val maxZoom = map.maxZoomLevel
-                    val targetZoom = (currentZoom + 2.0f).coerceAtMost(maxZoom)
-                    map.animateCamera(CameraUpdateFactory.newLatLngZoom(it.position, targetZoom))
+                    val builder = LatLngBounds.Builder()
+                    for (item in it.items) {
+                        builder.include(item.position)
+                    }
+                    map.animateCamera(CameraUpdateFactory.newLatLngBounds(builder.build(), 200))
                 }
 
                 delegate.notify("onClusterClick", data)

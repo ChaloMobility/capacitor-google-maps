@@ -39,6 +39,9 @@ export class CapacitorGoogleMapsWeb extends WebPlugin {
                 size: cluster.count,
                 items: items,
             });
+            if (cluster.bounds) {
+                map.fitBounds(cluster.bounds);
+            }
         };
     }
     getIdFromMap(map) {

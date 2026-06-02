@@ -990,6 +990,9 @@ var capacitorCapacitorGoogleMaps = (function (exports, core, markerclusterer) {
                     size: cluster.count,
                     items: items,
                 });
+                if (cluster.bounds) {
+                    map.fitBounds(cluster.bounds);
+                }
             };
         }
         getIdFromMap(map) {

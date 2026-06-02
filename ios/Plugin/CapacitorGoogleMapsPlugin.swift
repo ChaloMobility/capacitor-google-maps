@@ -1384,10 +1384,11 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
                 ])
             }
             
-            let currentZoom = mapView.camera.zoom
-            let targetZoom = min(currentZoom + 2.0, mapView.maxZoom)
-            let update = GMSCameraUpdate.setTarget(cluster.position, zoom: targetZoom)
-            mapView.animate(with: update)
+            var bounds = GMSCoordinateBounds()
+            for item in cluster.items {
+                bounds = bounds.includingCoordinate(item.position)
+            }
+            mapView.animate(with: GMSCameraUpdate.fit(bounds, withPadding: 200))
 
             self.notifyListeners("onClusterClick", data: [
                 "mapId": self.findMapIdByMapView(mapView),
