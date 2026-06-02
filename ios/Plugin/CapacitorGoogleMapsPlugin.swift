@@ -1317,6 +1317,7 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
         // GMUClusterManager no longer auto-clusters because we reclaimed the map delegate.
         if let map = map, map.mapViewController.clusteringEnabled {
             map.mapViewController.clusterMarker()
+            map.updateInfoWindowsForCurrentZoom()
         }
     }
 
@@ -1372,22 +1373,20 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
         if let cluster = marker.userData as? GMUCluster {
             var items: [[String: Any?]] = []
 
-            var bounds = GMSCoordinateBounds()
-            
             for item in cluster.items {
+                let markerData = (item as? GMSMarker)?.userData as? Marker
                 items.append([
-                    "markerId": String(item.hash.hashValue),
+                    "markerId": markerData?.id ?? String(item.hash.hashValue),
                     "latitude": item.position.latitude,
                     "longitude": item.position.longitude,
                     "title": item.title ?? "",
                     "snippet": item.snippet ?? ""
                 ])
-                
-                let coordinate = CLLocationCoordinate2D(latitude: item.position.latitude, longitude: item.position.longitude)
-                bounds = bounds.includingCoordinate(coordinate)
             }
             
-            let update = GMSCameraUpdate.fit(bounds, withPadding: 100) // Adjust padding as needed
+            let currentZoom = mapView.camera.zoom
+            let targetZoom = min(currentZoom + 2.0, mapView.maxZoom)
+            let update = GMSCameraUpdate.setTarget(cluster.position, zoom: targetZoom)
             mapView.animate(with: update)
 
             self.notifyListeners("onClusterClick", data: [
@@ -1398,7 +1397,9 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
                 "items": items
             ])
         } else {
-            let userInfo = marker.userData as! Marker
+            guard let userInfo = marker.userData as? Marker else {
+                return true
+            }
             var title = marker.title
             if((title?.isEmpty) != nil) {
                 title = userInfo.title
@@ -1406,7 +1407,7 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
 
             var data: [String: Any] = [
                 "mapId": self.findMapIdByMapView(mapView),
-                "markerId": String(marker.hash.hashValue),
+                "markerId": userInfo.id ?? String(marker.hash.hashValue),
                 "latitude": marker.position.latitude,
                 "longitude": marker.position.longitude,
                 "title": title ?? "",
@@ -1591,8 +1592,9 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
             var items: [[String: Any?]] = []
 
             for item in cluster.items {
+                let markerData = (item as? GMSMarker)?.userData as? Marker
                 items.append([
-                    "markerId": String(item.hash.hashValue),
+                    "markerId": markerData?.id ?? String(item.hash.hashValue),
                     "latitude": item.position.latitude,
                     "longitude": item.position.longitude,
                     "title": item.title ?? "",

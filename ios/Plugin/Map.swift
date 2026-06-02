@@ -558,6 +558,9 @@ public class Map {
                 self?.handleMultipleInfoWindowTap(marker: originalMarker, markerData: markerData)
             }
             
+            // Store the view before calculating its position so the sizing logic
+            // uses the actual rendered dimensions instead of fallback constants.
+            self.infoWindowMarkers[originalMarker.hash.hashValue] = infoWindowView
             
             // Calculate position and frame for the UIView
             let hasSnippet = !(markerData.snippet?.isEmpty ?? true)
@@ -576,11 +579,6 @@ public class Map {
             
             // Add the view to the map view
             self.mapViewController.GMapView.addSubview(infoWindowView)
-            
-            // Store reference
-            self.infoWindowMarkers[originalMarker.hash.hashValue] = infoWindowView
-            
-            
         }
     }
     private func updateInfoWindowContent(for markerId: Int, markerData: Marker) {
@@ -607,16 +605,22 @@ public class Map {
         if title == nil || title?.isEmpty == true {
             title = userInfo.title
         }
-        
-        // Trigger the same onMarkerClick event as regular marker taps
-        self.delegate.notifyListeners("onMarkerClick", data: [
+
+        var data: [String: Any] = [
             "mapId": self.id,
-            "markerId": String(marker.hash.hashValue),
+            "markerId": markerData.id ?? String(marker.hash.hashValue),
             "latitude": marker.position.latitude,
             "longitude": marker.position.longitude,
             "title": title ?? "",
             "snippet": marker.snippet ?? ""
-        ])
+        ]
+
+        if let infoData = markerData.infoData {
+            data["customData"] = infoData
+        }
+
+        // Trigger the same onMarkerClick event as regular marker taps
+        self.delegate.notifyListeners("onMarkerClick", data: data)
     }
 
 
@@ -2258,5 +2262,3 @@ class MarkerAnimationHelper: NSObject {
         }
     }
 }
-
-

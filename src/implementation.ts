@@ -221,8 +221,23 @@ CapacitorGoogleMaps.addListener("isMapInFocus", (data) => {
   const y = data.y;
 
   const elem = document.elementFromPoint(x, y) as HTMLElement | null;
-  const internalId = elem?.dataset?.internalId;
-  const mapInFocus = internalId === data.mapId;
+  const mapElement = Array.from(
+    document.querySelectorAll<HTMLElement>("[data-internal-id]")
+  ).find((el) => el.dataset.internalId === data.mapId);
+  const mapElementAtPoint = elem?.closest<HTMLElement>("[data-internal-id]");
+  const interactiveElementAtPoint = elem?.closest(
+    'a,button,input,textarea,select,[role="button"],[data-map-control="true"]'
+  );
+  const pointInsideMap =
+    mapElement &&
+    (() => {
+      const rect = mapElement.getBoundingClientRect();
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    })();
+  const mapInFocus = Boolean(
+    mapElementAtPoint?.dataset?.internalId === data.mapId ||
+      (pointInsideMap && !interactiveElementAtPoint)
+  );
 
   CapacitorGoogleMaps.dispatchMapEvent({ id: data.mapId, focus: mapInFocus });
 });
