@@ -53,6 +53,18 @@ class CustomClusterManagerRenderer(
     }
 
     override fun onBeforeClusterItemRendered(item: CapacitorGoogleMapMarker, markerOptions: MarkerOptions) {
+        item.markerOptions?.let {
+            markerOptions.position(it.position)
+            markerOptions.title(it.title)
+            markerOptions.snippet(it.snippet)
+            markerOptions.alpha(it.alpha)
+            markerOptions.flat(it.isFlat)
+            markerOptions.draggable(it.isDraggable)
+            markerOptions.rotation(it.rotation)
+            markerOptions.anchor(it.anchorU, it.anchorV)
+            markerOptions.zIndex(it.zIndex)
+        }
+
         val iconUrl = item.iconUrl
 
         when {
@@ -151,6 +163,7 @@ class CustomClusterManagerRenderer(
         marker.tag = item
         item.googleMapMarker = marker
         markClusterItemRendered(item)
+        marker.rotation = item.markerOptions?.rotation ?: marker.rotation
 
         if (item.infoData?.optBoolean("showInfoIcon") == true) {
             marker.showInfoWindow()

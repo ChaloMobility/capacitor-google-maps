@@ -86,6 +86,31 @@ class CapacitorGoogleMap(
     private var clusterSettledGeneration: Int = 0
     private var clusterRenderInProgress: Boolean = false
 
+    private fun resolveMarkerRotation(marker: CapacitorGoogleMapMarker): Float {
+        if (marker.rotation != 1) {
+            return 0.0f
+        }
+
+        return if (marker.hasAngleDiff) {
+            marker.angleDiff
+        } else {
+            getAngle(marker.coordinate)
+        }
+    }
+
+    private fun syncMarkerHeadingState(
+        target: CapacitorGoogleMapMarker,
+        source: CapacitorGoogleMapMarker
+    ) {
+        target.rotation = source.rotation
+        target.hasAngleDiff = source.hasAngleDiff
+        target.angleDiff = source.angleDiff
+        target.bearingAngle = source.bearingAngle
+        target.markerBgColor = source.markerBgColor
+        target.iconSize = source.iconSize
+        target.markerOptions = source.getMarkerOptionsUpdated().rotation(resolveMarkerRotation(source))
+    }
+
     private val clusterRenderListener = object : CustomClusterManagerRenderer.ClusterRenderListener {
         override fun onClusterRenderPassStarted(
             generation: Int,
@@ -307,13 +332,7 @@ class CapacitorGoogleMap(
                             val markerOptions = it.getMarkerOptionsUpdated()
 
                             // Handle rotation
-                            if(it.rotation == 1) {
-                                if (it.angleDiff > 0) {
-                                    markerOptions.rotation(it.angleDiff)
-                                } else {
-                                    markerOptions.rotation(getAngle(it.coordinate))
-                                }
-                            }
+                            markerOptions.rotation(resolveMarkerRotation(it))
 
                             // Handle buses_custom_marker
                             if (it.iconUrl?.contains("buses_custom_marker") == true) {
@@ -567,13 +586,7 @@ class CapacitorGoogleMap(
 
                     val markerOptions = marker.getMarkerOptionsUpdated()
                     //               val googleMapMarker = googleMap?.addMarker(markerOptions)
-                    if(marker.rotation == 1) {
-                        if (marker.angleDiff > 0) {
-                            markerOptions.rotation(marker.angleDiff)
-                        } else {
-                            markerOptions.rotation(getAngle(marker.coordinate))
-                        }
-                    }
+                    markerOptions.rotation(resolveMarkerRotation(marker))
                     if(marker.iconUrl?.contains("buses_custom_marker") == true) {
                         val bridge = delegate.bridge
                         val busesMarker = BusesMarker(bridge.context)
@@ -879,7 +892,8 @@ class CapacitorGoogleMap(
     ) {
         infoWindowMarker.position = calculateInfoWindowPosition(visibleMarker.position)
         infoWindowMarker.zIndex = visibleMarker.zIndex + 1.0f
-        if (item.infoIcon?.contains("reverse") == true) {
+        val isReverse = item.infoIcon?.contains("reverse") == true
+        if (isReverse) {
             infoWindowMarker.setAnchor(0.4f, -0.15f)
         } else {
             infoWindowMarker.setAnchor(0.4f, 1.0f)
@@ -1030,6 +1044,7 @@ class CapacitorGoogleMap(
                         // Skip all info window processing
                         oldMarker?.googleMapMarker?.hideInfoWindow()
                     }
+
                     if (shouldShowInfoWindow && marker.infoIcon?.contains("multiple_info_window") == true) {
                         val existingInfoWindow = infoWindowMarkers[marker.id]
                         val infoWindowTypeChanged = oldMarker?.infoIcon != marker.infoIcon
@@ -1045,7 +1060,8 @@ class CapacitorGoogleMap(
                                 existingInfoWindow.setIcon(BitmapDescriptorFactory.fromBitmap(newInfoWindowBitmap))
 
                                 // Update anchor for new tail direction
-                                if (marker.infoIcon?.contains("reverse") == true) {
+                                val isReverse = marker.infoIcon?.contains("reverse") == true
+                                if (isReverse) {
                                     existingInfoWindow.setAnchor(0.4f, -0.15f)
                                 } else {
                                     existingInfoWindow.setAnchor(0.4f, 1.0f)
@@ -1092,16 +1108,7 @@ class CapacitorGoogleMap(
                         // Set the camera position of map to the centre of the marker
                         //                    googleMap?.animateCamera(CameraUpdateFactory.newLatLng(marker!!.coordinate), 5000, null)
 
-                        if (marker.rotation == 1) {
-                            if(marker.angleDiff != 0.0f){
-                                oldMarker?.googleMapMarker?.rotation = marker.angleDiff
-                            }
-                            else{
-                                oldMarker?.googleMapMarker?.rotation = getAngle(marker!!.coordinate)
-                            }
-                        } else {
-                            oldMarker?.googleMapMarker?.rotation = 0.0f
-                        }
+                        oldMarker?.googleMapMarker?.rotation = resolveMarkerRotation(marker)
 
                         // In case marker is only for showing info window
                         if (marker.iconUrl?.isEmpty() == true) {
@@ -1172,6 +1179,7 @@ class CapacitorGoogleMap(
                             it.infoData = marker.infoData
                             it.infoIcon = marker.infoIcon
                             it.title = marker.title
+                            syncMarkerHeadingState(it, marker)
 
 
 //                              Remove and re-add the marker to the ClusterManager.
@@ -1184,9 +1192,12 @@ class CapacitorGoogleMap(
                     }
 
                     // Update oldMarker fields so next call detects changes correctly
+                    oldMarker?.coordinate = marker.coordinate
+                    oldMarker?.iconUrl = marker.iconUrl
                     oldMarker?.infoIcon = marker.infoIcon
                     oldMarker?.infoData = marker.infoData
                     oldMarker?.title = marker.title
+                    oldMarker?.let { syncMarkerHeadingState(it, marker) }
 
                     markerId = marker?.id.toString()
                     callback(Result.success(markerId))
@@ -1262,7 +1273,8 @@ class CapacitorGoogleMap(
                                 val newBitmap = multipleInfoWindowView.createInfoWindowBitmap(marker)
                                 existingInfoWindow.setIcon(BitmapDescriptorFactory.fromBitmap(newBitmap))
 
-                                if (marker.infoIcon?.contains("reverse") == true) {
+                                val isReverse = marker.infoIcon?.contains("reverse") == true
+                                if (isReverse) {
                                     existingInfoWindow.setAnchor(0.4f, -0.15f)
                                 } else {
                                     existingInfoWindow.setAnchor(0.4f, 1.0f)
@@ -1289,17 +1301,9 @@ class CapacitorGoogleMap(
                     } ?: animateMarker(oldMarker.googleMapMarker, marker.coordinate)
                 }
                 oldMarker.coordinate = marker.coordinate
+                syncMarkerHeadingState(oldMarker, marker)
 
-                if(marker.rotation == 1){
-                    if(marker.angleDiff>0){
-                        oldMarker?.googleMapMarker?.rotation = marker.angleDiff
-                    }
-                    else {
-                        oldMarker?.googleMapMarker?.rotation = getAngle(marker!!.coordinate)
-                    }
-                }else{
-                    oldMarker?.googleMapMarker?.rotation =  0.0f
-                }
+                oldMarker?.googleMapMarker?.rotation = resolveMarkerRotation(marker)
 
                 // In case marker is only for showing info window
                 if(marker.iconUrl?.isEmpty() == true){
@@ -1394,6 +1398,7 @@ class CapacitorGoogleMap(
                 val bridge = delegate.bridge
                 clusterManager = ClusterManager(bridge.context, googleMap)
                 customClusterRenderer = CustomClusterManagerRenderer(bridge.context, googleMap!!, clusterManager!!)
+                customClusterRenderer?.setAnimation(false)
                 customClusterRenderer?.setClusterRenderListener(clusterRenderListener)
                 clusterManager!!.renderer = customClusterRenderer
 
@@ -2154,7 +2159,7 @@ class CapacitorGoogleMap(
             data.put("snippet", snippet)
         }
         delegate.notify("onMarkerClick", data)
-         if (markerData?.infoIcon?.contains("multiple_info_window") == true) {
+        if (markerData?.infoIcon?.contains("multiple_info_window") == true) {
             return true  // info displayed via separate bitmap marker, suppress default info window
         }
         return false
@@ -2256,7 +2261,7 @@ class CapacitorGoogleMap(
 
     override fun onCameraMove() {
         val currentZoom = googleMap?.cameraPosition?.zoom ?: 0f
-        
+
         // FIX: Immediately remove info windows during camera movement to prevent
         // them from being visible while their markers are being clustered.
         // This solves Issue 2 where info windows persist during cluster transitions.
@@ -2264,7 +2269,7 @@ class CapacitorGoogleMap(
             infoWindowMarkers.values.forEach { it.remove() }
             infoWindowMarkers.clear()
         }
-        
+
         debounceJob?.cancel()
         debounceJob = CoroutineScope(Dispatchers.Main).launch {
             delay(50)
@@ -2370,11 +2375,11 @@ class CapacitorGoogleMap(
             // Add all info window markers in one batch on Main thread
             for ((candidate, bitmap) in bitmapResults) {
                 val gmMarker = candidate.visibleMarker
-                
+
                 // FIX: Re-validate marker is still visible and not clustered before creating info window
                 // This prevents Issue 1 (wrong position) and Issue 2 (persists when clustered)
                 if (!gmMarker.isVisible) continue
-                
+
                 // FIX: For clustered markers, verify they're STILL rendered individually
                 // This catches the case where marker became clustered during bitmap creation
                 if (candidate.marker.isClustered) {
@@ -2384,7 +2389,7 @@ class CapacitorGoogleMap(
                         continue
                     }
                 }
-                
+
                 val infoWindowKey = getInfoWindowKey(candidate.marker, gmMarker)
                 // Skip if already created (by a concurrent path)
                 if (infoWindowMarkers.containsKey(infoWindowKey)) {
