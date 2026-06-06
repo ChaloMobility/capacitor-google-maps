@@ -885,6 +885,54 @@ class CapacitorGoogleMap(
         }
     }
 
+    private fun expandCluster(cluster: Cluster<CapacitorGoogleMapMarker>) {
+        googleMap?.let { map ->
+
+            // If the cluster contains multiple markers at different locations,
+            // zoom to bounds so all markers become visible.
+            if (cluster.size > 1) {
+                try {
+                    val builder = LatLngBounds.Builder()
+
+                    cluster.items.forEach { item ->
+                        builder.include(item.position)
+                    }
+
+                    val bounds = builder.build()
+
+                    map.animateCamera(
+                        CameraUpdateFactory.newLatLngBounds(
+                            bounds,
+                            100 // padding in px
+                        )
+                    )
+
+                    return
+                } catch (e: Exception) {
+                   
+                }
+            }
+
+            // Fallback for:
+            // - single marker clusters
+            // - markers at exactly the same coordinates
+            // - bounds calculation failures
+            val currentZoom = map.cameraPosition?.zoom ?: 0f
+            val targetZoom = minOf(currentZoom + 2f, map.maxZoomLevel)
+
+            map.animateCamera(
+                CameraUpdateFactory.newCameraPosition(
+                    CameraPosition.Builder()
+                        .target(cluster.position)
+                        .zoom(targetZoom)
+                        .bearing(map.cameraPosition?.bearing ?: 0f)
+                        .tilt(map.cameraPosition?.tilt ?: 0f)
+                        .build()
+                )
+            )
+        }
+    }
+
     private fun syncInfoWindowMarker(
         item: CapacitorGoogleMapMarker,
         visibleMarker: Marker,
@@ -2006,18 +2054,10 @@ class CapacitorGoogleMap(
                 delegate.notify("onClusterInfoWindowClick", data)
             }
 
-            clusterManager?.setOnClusterClickListener {
-                val data = this@CapacitorGoogleMap.getClusterData(it)
-                googleMap?.let { map ->
-                    val builder = LatLngBounds.Builder()
-                    for (item in it.items) {
-                        builder.include(item.position)
-                    }
-                    map.animateCamera(CameraUpdateFactory.newLatLngBounds(builder.build(), 200))
-                }
-
+            clusterManager?.setOnClusterClickListener { cluster ->
+                val data = this@CapacitorGoogleMap.getClusterData(cluster)
+                expandCluster(cluster)
                 delegate.notify("onClusterClick", data)
-//              If false is returned then the above changes to zoom in inside the cluster will not work
                 true
             }
 
@@ -2099,10 +2139,7 @@ class CapacitorGoogleMap(
 
         if (clusterManager != null && markerTag !is CapacitorGoogleMapMarker) {
             val handledByClusterManager = clusterManager?.onMarkerClick(marker) ?: false
-            if (handledByClusterManager) {
-                return true
-            }
-            return true
+            return handledByClusterManager
         }
 
         val infoData = (marker?.tag as? CapacitorGoogleMapMarker)?.infoData
@@ -2125,7 +2162,8 @@ class CapacitorGoogleMap(
             // For the cluster marker when clicked should zoom into the
             // So when below method is called clusterManager?.setOnClusterClickListener is called
             // and marker gets zoomed in
-            return clusterManager?.onMarkerClick(marker) ?: false
+            val handledByClusterManager = clusterManager?.onMarkerClick(marker) ?: false
+            return handledByClusterManager
         }
 
         data.put("mapId", this@CapacitorGoogleMap.id)

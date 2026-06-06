@@ -17,8 +17,12 @@ class DynamicMarkerGenerator(private val context: Context) {
         private const val ARROW_WIDTH = 42        // Arrow width
         private const val ARROW_HEIGHT = 36       // Arrow height
         private const val GAP = 8                 // Gap between arrow and circle
-        private const val BITMAP_WIDTH = 210      // Total bitmap width
-        private const val BITMAP_HEIGHT = CIRCLE_SIZE + ARROW_HEIGHT * 2 + GAP * 2 + 46// Total height
+        private const val SIDE_PADDING = 15
+        private const val VERTICAL_PADDING = 10
+        private const val BITMAP_WIDTH = 
+            CIRCLE_SIZE + (ARROW_HEIGHT + GAP) * 2 + SIDE_PADDING * 2
+        private const val BITMAP_HEIGHT =
+            CIRCLE_SIZE + (ARROW_HEIGHT + GAP) * 2 + VERTICAL_PADDING * 2
         private val SHADOW_COLOR = Color.argb((0.4f * 255).toInt(), 0, 0, 0)
         private const val SHADOW_RADIUS = 8.909f
         private const val SHADOW_DX = 0f
@@ -69,7 +73,7 @@ class DynamicMarkerGenerator(private val context: Context) {
         }
 
         val pivotX = BITMAP_WIDTH / 2f
-        val pivotY = ARROW_HEIGHT + GAP + CIRCLE_SIZE / 2f
+        val pivotY = VERTICAL_PADDING + ARROW_HEIGHT + GAP + CIRCLE_SIZE / 2f
 
         val arrowTipY = pivotY - CIRCLE_SIZE / 2f - GAP - ARROW_HEIGHT
         val arrowBaseY = pivotY - CIRCLE_SIZE / 2f - GAP
@@ -91,7 +95,7 @@ class DynamicMarkerGenerator(private val context: Context) {
 
     private fun drawCircle(canvas: Canvas, @ColorInt statusColor: Int) {
         val circleCenterX = BITMAP_WIDTH / 2f
-        val circleCenterY = ARROW_HEIGHT + GAP + CIRCLE_SIZE / 2f
+        val circleCenterY = VERTICAL_PADDING + ARROW_HEIGHT + GAP + CIRCLE_SIZE / 2f
         val radius = CIRCLE_SIZE / 2f
 //        val shadowColor = Color.argb((0.4f * 255).toInt(), 0, 0, 0)
         val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -109,7 +113,7 @@ class DynamicMarkerGenerator(private val context: Context) {
         val drawable = ContextCompat.getDrawable(context, busIconRes) ?: return
         val originalBitmap = drawableToBitmap(drawable)
         val circleCenterX = BITMAP_WIDTH / 2f
-        val circleCenterY = ARROW_HEIGHT + GAP + CIRCLE_SIZE / 2f
+        val circleCenterY = VERTICAL_PADDING + ARROW_HEIGHT + GAP + CIRCLE_SIZE / 2f
         val targetSize = (CIRCLE_SIZE * BUS_ICON_SCALE).toInt()
         val bitmap = scaleBitmapPreserveRatio(originalBitmap, targetSize)
         val iconWidth = bitmap.width
@@ -129,7 +133,7 @@ class DynamicMarkerGenerator(private val context: Context) {
      * Ensures marker aligns with bus circle center.
      */
     fun getAnchor(): Pair<Float, Float> {
-        val pivotY = ARROW_HEIGHT + GAP + CIRCLE_SIZE / 2f
+        val pivotY = VERTICAL_PADDING + ARROW_HEIGHT + GAP + CIRCLE_SIZE / 2f
         val anchorX = 0.5f
         val anchorY = pivotY / BITMAP_HEIGHT.toFloat()
         return Pair(anchorX, anchorY)
