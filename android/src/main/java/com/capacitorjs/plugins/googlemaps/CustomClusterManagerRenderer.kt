@@ -18,6 +18,11 @@ class CustomClusterManagerRenderer(
     private val map: GoogleMap,
     clusterManager: ClusterManager<CapacitorGoogleMapMarker>
 ) : DefaultClusterRenderer<CapacitorGoogleMapMarker>(context, map, clusterManager) {
+    companion object {
+        private const val DEFAULT_MARKER_Z_INDEX = 10f
+        private const val CLUSTER_Z_INDEX = 20f
+    }
+
     interface ClusterRenderListener {
         fun onClusterRenderPassStarted(generation: Int, expectedRenderedItemKeys: Set<String>)
         fun onClusterRenderPassSettled(generation: Int, expectedRenderedItemKeys: Set<String>)
@@ -62,7 +67,7 @@ class CustomClusterManagerRenderer(
             markerOptions.draggable(it.isDraggable)
             markerOptions.rotation(it.rotation)
             markerOptions.anchor(it.anchorU, it.anchorV)
-            markerOptions.zIndex(it.zIndex)
+            markerOptions.zIndex(resolveClusterItemZIndex(it.zIndex))
         }
 
         val iconUrl = item.iconUrl
@@ -156,6 +161,7 @@ class CustomClusterManagerRenderer(
         super.onClusterItemRendered(item, marker)
         marker.tag = item
         item.googleMapMarker = marker
+        marker.zIndex = resolveClusterItemZIndex(marker.zIndex)
         markClusterItemRendered(item)
     }
 
@@ -164,6 +170,7 @@ class CustomClusterManagerRenderer(
         item.googleMapMarker = marker
         markClusterItemRendered(item)
         marker.rotation = item.markerOptions?.rotation ?: marker.rotation
+        marker.zIndex = resolveClusterItemZIndex(item.markerOptions?.zIndex ?: marker.zIndex)
 
         if (item.infoData?.optBoolean("showInfoIcon") == true) {
             marker.showInfoWindow()
@@ -227,8 +234,30 @@ class CustomClusterManagerRenderer(
         }
     }
 
+    override fun onBeforeClusterRendered(
+        cluster: Cluster<CapacitorGoogleMapMarker>,
+        markerOptions: MarkerOptions
+    ) {
+        super.onBeforeClusterRendered(cluster, markerOptions)
+        markerOptions.zIndex(CLUSTER_Z_INDEX)
+    }
+
+    override fun onClusterRendered(cluster: Cluster<CapacitorGoogleMapMarker>, marker: Marker) {
+        super.onClusterRendered(cluster, marker)
+        marker.zIndex = maxOf(marker.zIndex, CLUSTER_Z_INDEX)
+    }
+
+    override fun onClusterUpdated(cluster: Cluster<CapacitorGoogleMapMarker>, marker: Marker) {
+        super.onClusterUpdated(cluster, marker)
+        marker.zIndex = maxOf(marker.zIndex, CLUSTER_Z_INDEX)
+    }
+
     override fun getColor(clusterSize: Int): Int {
         return clusterColor
+    }
+
+    private fun resolveClusterItemZIndex(requestedZIndex: Float): Float {
+        return maxOf(requestedZIndex, DEFAULT_MARKER_Z_INDEX)
     }
 
     private fun markClusterItemRendered(item: CapacitorGoogleMapMarker) {

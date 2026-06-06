@@ -3,12 +3,18 @@ import GoogleMaps
 import Capacitor
 import GoogleMapsUtils
 
+private enum MarkerLayerZ {
+    static let depot: Int32 = 1
+    static let regular: Int32 = 10
+    static let cluster: Int32 = 20
+}
+
 public struct LatLng: Codable {
     let lat: Double
     let lng: Double
 }
 
-class GMViewController: UIViewController {
+class GMViewController: UIViewController, GMUClusterRendererDelegate {
     var mapViewBounds: [String: Double]!
     var GMapView: GMSMapView!
     var cameraPosition: [String: Double]!
@@ -62,6 +68,8 @@ class GMViewController: UIViewController {
         }
         let algorithm = GMUNonHierarchicalDistanceBasedAlgorithm()
         let renderer = GMUDefaultClusterRenderer(mapView: self.GMapView, clusterIconGenerator: iconGenerator)
+        renderer.zIndex = MarkerLayerZ.cluster
+        renderer.delegate = self
 
         self._clusterManager = GMUClusterManager(map: self.GMapView, algorithm: algorithm, renderer: renderer)
         // NOTE: GMUClusterManager internally overrides GMapView.delegate to itself.
@@ -161,6 +169,23 @@ class GMViewController: UIViewController {
                 clusterMarker()
             }
         }
+    }
+
+    func renderer(_ renderer: GMUClusterRenderer, willRenderMarker marker: GMSMarker) {
+        applyClusterLayering(to: marker)
+    }
+
+    func renderer(_ renderer: GMUClusterRenderer, didRenderMarker marker: GMSMarker) {
+        applyClusterLayering(to: marker)
+    }
+
+    private func applyClusterLayering(to marker: GMSMarker) {
+        if marker.userData is GMUCluster {
+            marker.zIndex = max(marker.zIndex, MarkerLayerZ.cluster)
+            return
+        }
+
+        marker.zIndex = max(marker.zIndex, MarkerLayerZ.regular)
     }
 }
 
