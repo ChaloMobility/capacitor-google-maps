@@ -1176,18 +1176,15 @@ public class Map {
                      let endPosition = CLLocationCoordinate2D(latitude: marker.coordinate.lat, longitude: marker.coordinate.lng)
                      let positionChanged = startPosition.latitude != endPosition.latitude || startPosition.longitude != endPosition.longitude
                      let isClusterManaged = self.isClusterManagedMarker(oldMarker)
+                     let isRenderedIndividually = oldMarker.map != nil
+                     let shouldAnimateVisibleClusterMarker = positionChanged && isClusterManaged && isRenderedIndividually && duration > 0
 
-                     if positionChanged && isClusterManaged {
-                         self.mapViewController.updateMarkerPosition(marker: oldMarker, newPosition: endPosition)
-                         DispatchQueue.main.async {
-                             self.updateInfoWindowPositions()
-                             self.updateInfoWindowsForCurrentZoom()
-                         }
-                     } else if positionChanged && duration > 0 {
+                     if shouldAnimateVisibleClusterMarker || (positionChanged && duration > 0 && !isClusterManaged) {
                          // Use CADisplayLink-based animation for reliable frame-by-frame marker + info window sync
                          let markerHash = oldMarker.hash.hashValue
                          let hasSnippet = !(marker.snippet?.isEmpty ?? true)
                          let isReverse = marker.infoIcon?.contains("reverse") ?? false
+                         let shouldRefreshClusterAfterAnimation = isClusterManaged && isRenderedIndividually
 
                          let helper = MarkerAnimationHelper(
                              startTime: CACurrentMediaTime(),
@@ -1203,10 +1200,22 @@ public class Map {
                              markerHash: markerHash,
                              hasSnippet: hasSnippet,
                              isReverse: isReverse,
-                             zoomLevel: self.multipleInfoWindowZoomLevel
+                             zoomLevel: self.multipleInfoWindowZoomLevel,
+                             onComplete: { [weak self] in
+                                 guard shouldRefreshClusterAfterAnimation else { return }
+                                 self?.mapViewController.clusterMarker()
+                                 self?.updateInfoWindowPositions()
+                                 self?.updateInfoWindowsForCurrentZoom()
+                             }
                          )
                          let displayLink = CADisplayLink(target: helper, selector: #selector(MarkerAnimationHelper.step(_:)))
                          displayLink.add(to: .main, forMode: .common)
+                     } else if positionChanged && isClusterManaged {
+                         self.mapViewController.updateMarkerPosition(marker: oldMarker, newPosition: endPosition)
+                         DispatchQueue.main.async {
+                             self.updateInfoWindowPositions()
+                             self.updateInfoWindowsForCurrentZoom()
+                         }
                      } else {
                          // No animation — snap to final position
                          oldMarker.position = endPosition
@@ -2297,6 +2306,7 @@ class MarkerAnimationHelper: NSObject {
     private let hasSnippet: Bool
     private let isReverse: Bool
     private let zoomLevel: Float
+    private let onComplete: (() -> Void)?
 
     init(startTime: CFTimeInterval, duration: Double,
          startLat: Double, startLng: Double,
@@ -2308,7 +2318,8 @@ class MarkerAnimationHelper: NSObject {
          markerHash: Int,
          hasSnippet: Bool,
          isReverse: Bool,
-         zoomLevel: Float) {
+         zoomLevel: Float,
+         onComplete: (() -> Void)? = nil) {
         self.startTime = startTime
         self.duration = duration
         self.startLat = startLat
@@ -2323,6 +2334,7 @@ class MarkerAnimationHelper: NSObject {
         self.hasSnippet = hasSnippet
         self.isReverse = isReverse
         self.zoomLevel = zoomLevel
+        self.onComplete = onComplete
     }
 
     @objc func step(_ displayLink: CADisplayLink) {
@@ -2360,6 +2372,7 @@ class MarkerAnimationHelper: NSObject {
 
         if fraction >= 1.0 {
             displayLink.invalidate()
+            onComplete?()
         }
     }
 }
