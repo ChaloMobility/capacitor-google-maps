@@ -34,6 +34,7 @@ class CapacitorGoogleMapMarker(val context: Context, fromJSONObject: JSONObject)
     var infoIcon: String? = null
     var infoData: JSONObject? = null
     var rotation: Int = 0
+    var hasAngleDiff: Boolean = false
     var id: String? = null
     var bearingAngle: Float = 0.0f
     private var customAnchor: CapacitorGoogleMapsPoint = CapacitorGoogleMapsPoint(0.5F, 0.5F)
@@ -94,11 +95,12 @@ class CapacitorGoogleMapMarker(val context: Context, fromJSONObject: JSONObject)
         }
 
         draggable = fromJSONObject.optBoolean("draggable", false)
-        isClustered = fromJSONObject.optBoolean("isClustered", true)
+        isClustered = fromJSONObject.optBoolean("isClustered", false)
 
         id = fromJSONObject.optString("id")
         zIndex = fromJSONObject.optDouble("zIndex", 1.0 ).toFloat()
         rotation = fromJSONObject.optInt("rotation")
+        hasAngleDiff = fromJSONObject.has("angleDiff")
         angleDiff = fromJSONObject.optDouble("angleDiff", 0.0 ).toFloat()
         bearingAngle = fromJSONObject.optDouble("bearingAngle",0.0).toFloat()
     }

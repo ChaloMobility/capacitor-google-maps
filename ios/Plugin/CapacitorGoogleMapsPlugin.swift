@@ -1312,6 +1312,18 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate {
 
         self.notifyListeners("onBoundsChanged", data: data)
         self.notifyListeners("onCameraIdle", data: data)
+
+        // Re-cluster markers at the new zoom level through the exception-safe wrapper.
+        // GMUClusterManager no longer auto-clusters because we reclaimed the map delegate.
+        if let map = map, map.mapViewController.clusteringEnabled {
+            map.mapViewController.clusterMarker()
+
+            // Update/create custom multiple info windows after cluster state settles.
+            DispatchQueue.main.async {
+                map.updateInfoWindowPositions()
+                map.updateInfoWindowsForCurrentZoom()
+            }
+        }
     }
 
     // onCameraMoveStarted

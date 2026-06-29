@@ -3,12 +3,18 @@ import GoogleMaps
 import Capacitor
 import GoogleMapsUtils
 
+private enum MarkerLayerZ {
+    static let depot: Int32 = 1
+    static let regular: Int32 = 10
+    static let cluster: Int32 = 20
+}
+
 public struct LatLng: Codable {
     let lat: Double
     let lng: Double
 }
 
-class GMViewController: UIViewController {
+class GMViewController: UIViewController, GMUClusterRendererDelegate {
     var mapViewBounds: [String: Double]!
     var GMapView: GMSMapView!
     var cameraPosition: [String: Double]!
@@ -18,7 +24,21 @@ class GMViewController: UIViewController {
     var circleView: UIView!
     var circle: GMSCircle!
 
-    private var clusterManager: GMUClusterManager?
+    // Internal access to allow Map to perform batch removal without nested dispatch
+    var clusterManager: GMUClusterManager? {
+        get { return _clusterManager }
+    }
+    private var _clusterManager: GMUClusterManager?
+
+    /// When true, cluster-mutating methods skip the automatic `cluster()` call.
+    /// Set before a batch of add/remove/update operations, then call `clusterMarker()` once when done.
+    var skipClustering = false
+
+    /// Called when clustering fails and items are cleared, allowing the Map to re-add markers.
+    var clusterRecoveryHandler: (() -> Void)?
+
+    /// Guard against re-entrant clustering (e.g. recovery handler triggering another cluster call).
+    var isClusteringInProgress = false
 
     var clusteringEnabled: Bool {
         return clusterManager != nil
@@ -48,49 +68,95 @@ class GMViewController: UIViewController {
         }
         let algorithm = GMUNonHierarchicalDistanceBasedAlgorithm()
         let renderer = GMUDefaultClusterRenderer(mapView: self.GMapView, clusterIconGenerator: iconGenerator)
+        renderer.zIndex = MarkerLayerZ.cluster
+        renderer.delegate = self
 
-        self.clusterManager = GMUClusterManager(map: self.GMapView, algorithm: algorithm, renderer: renderer)
+        self._clusterManager = GMUClusterManager(map: self.GMapView, algorithm: algorithm, renderer: renderer)
+        // NOTE: GMUClusterManager internally overrides GMapView.delegate to itself.
+        // The caller must reclaim the delegate after calling this method.
     }
 
     func destroyClusterManager() {
-        self.clusterManager = nil
+        self._clusterManager = nil
     }
     
     func clusterMarker() {
-        if let clusterManager = clusterManager {
-            clusterManager.cluster()
+        guard let clusterManager = clusterManager else { return }
+        // Prevent re-entrant clustering (e.g. recovery handler triggering another cluster)
+        guard !isClusteringInProgress else {
+            NSLog("CapacitorGoogleMaps: skipping re-entrant cluster() call")
+            return
         }
+        isClusteringInProgress = true
+        defer { isClusteringInProgress = false }
+
+        ObjCExceptionCatcher.try({
+            clusterManager.cluster()
+        }, catch: { [weak self] exception in
+            NSLog("CapacitorGoogleMaps: clustering exception caught – \(exception.reason ?? "unknown"). Clearing and re-adding items.")
+            // Recover: clear the algorithm's state and re-add all current items
+            clusterManager.clearItems()
+            // Re-add markers so they are not permanently lost.
+            // The recovery handler will call addMarkersToCluster which respects
+            // skipClustering, so it won't recurse back into clusterMarker().
+            let savedSkip = self?.skipClustering ?? false
+            self?.skipClustering = true
+            self?.clusterRecoveryHandler?()
+            self?.skipClustering = savedSkip
+        })
     }
     
     func updateMarkerPosition(marker: GMSMarker, newPosition: CLLocationCoordinate2D) {
-            guard let clusterManager = clusterManager else { return }
-                
-                // Check if the marker is visible (not clustered)
-            if marker.map != nil &&
-                (marker.position.latitude != newPosition.latitude ||
-                marker.position.longitude != newPosition.longitude) {
-                    // The marker is visible on the map
-                    clusterManager.remove(marker)
-                    
-                    // Update the marker's position
-                    marker.position = newPosition
-                    
-                    clusterManager.add(marker)
-                    
-                    // Since the marker's position has changed, it may need to be re-clustered
-                    clusterManager.cluster()
-                } else {
-                    print("Not inside the map", marker.title)
-                    // The marker is not visible (it's inside a cluster)
-                    // Do not update the position
-                }
+        guard let clusterManager = clusterManager else { return }
 
-            }
+        // Validate new position
+        guard newPosition.latitude.isFinite && newPosition.longitude.isFinite
+              && newPosition.latitude >= -90 && newPosition.latitude <= 90
+              && newPosition.longitude >= -180 && newPosition.longitude <= 180 else {
+            NSLog("CapacitorGoogleMaps: ignoring invalid marker position (\(newPosition.latitude), \(newPosition.longitude))")
+            return
+        }
+
+        let positionChanged = marker.position.latitude != newPosition.latitude ||
+                              marker.position.longitude != newPosition.longitude
+        guard positionChanged else { return }
+
+        // Update position via remove→add. Wrap in exception catcher because the
+        // algorithm's internal state can be inconsistent during rapid updates.
+        ObjCExceptionCatcher.try({ [weak self] in
+            clusterManager.remove(marker)
+            marker.position = newPosition
+            clusterManager.add(marker)
+        }, catch: { [weak self] exception in
+            NSLog("CapacitorGoogleMaps: exception during clustered marker reindex – \(exception.reason ?? "unknown"). Rebuilding cluster state.")
+            marker.position = newPosition
+            clusterManager.clearItems()
+            let savedSkip = self?.skipClustering ?? false
+            self?.skipClustering = true
+            self?.clusterRecoveryHandler?()
+            self?.skipClustering = savedSkip
+        })
+
+        if !skipClustering {
+            clusterMarker()
+        }
+    }
 
     func addMarkersToCluster(markers: [GMSMarker]) {
         if let clusterManager = clusterManager {
-            clusterManager.add(markers)
-            clusterManager.cluster()
+            // Filter out markers with invalid coordinates to prevent clustering crash
+            let validMarkers = markers.filter { marker in
+                let lat = marker.position.latitude
+                let lng = marker.position.longitude
+                return lat.isFinite && lng.isFinite
+                    && lat >= -90 && lat <= 90
+                    && lng >= -180 && lng <= 180
+            }
+            if validMarkers.isEmpty { return }
+            clusterManager.add(validMarkers)
+            if !skipClustering {
+                clusterMarker()
+            }
         }
     }
 
@@ -99,8 +165,27 @@ class GMViewController: UIViewController {
             markers.forEach { marker in
                 clusterManager.remove(marker)
             }
-            clusterManager.cluster()
+            if !skipClustering {
+                clusterMarker()
+            }
         }
+    }
+
+    func renderer(_ renderer: GMUClusterRenderer, willRenderMarker marker: GMSMarker) {
+        applyClusterLayering(to: marker)
+    }
+
+    func renderer(_ renderer: GMUClusterRenderer, didRenderMarker marker: GMSMarker) {
+        applyClusterLayering(to: marker)
+    }
+
+    private func applyClusterLayering(to marker: GMSMarker) {
+        if marker.userData is GMUCluster {
+            marker.zIndex = max(marker.zIndex, MarkerLayerZ.cluster)
+            return
+        }
+
+        marker.zIndex = max(marker.zIndex, MarkerLayerZ.regular)
     }
 }
 
@@ -138,10 +223,46 @@ public class Map {
     private var resizedIconCache = [String: UIImage]()
     private static let dynamicMarkerGenerator = DynamicMarkerGenerator()
 
+    private func resolvedRotation(for marker: Marker) throws -> Double {
+        guard (marker.rotation) == 1 else {
+            return 0
+        }
+
+        if let angleDiff = marker.angleDiff {
+            return angleDiff
+        }
+
+        return try getAngle(marker: marker)
+    }
+
     // swiftlint:disable weak_delegate
     private var delegate: CapacitorGoogleMapsPlugin
     var markerIdOnWeb = [String : Int]()
     private var markerIdNotOnCluster = [String]()
+
+    private func markerIsExcludedFromCluster(markerHash: Int, marker: GMSMarker) -> Bool {
+        if self.markerIdNotOnCluster.contains(String(markerHash)) {
+            return true
+        }
+        if let markerData = marker.userData as? Marker, let markerId = markerData.id,
+           self.markerIdNotOnCluster.contains(markerId) {
+            return true
+        }
+        return false
+    }
+
+    private func isClusterManagedMarker(_ marker: GMSMarker) -> Bool {
+        guard self.mapViewController.clusteringEnabled else {
+            return false
+        }
+
+        let markerHash = marker.hash.hashValue
+        guard let markerDetail = self.markersDetails[markerHash], (markerDetail.isClustered ?? true) else {
+            return false
+        }
+
+        return !markerIsExcludedFromCluster(markerHash: markerHash, marker: marker)
+    }
 
     init(id: String, config: GoogleMapConfig, delegate: CapacitorGoogleMapsPlugin) {
         self.id = id
@@ -441,15 +562,7 @@ public class Map {
                     }
                 }
                 do {
-                    if((marker.rotation) == 1){
-                        if let angleDiff = marker.angleDiff {
-                            newMarker.rotation = angleDiff != 0 ? angleDiff : try getAngle(marker: marker)
-                        } else {
-                            newMarker.rotation = try getAngle(marker: marker)
-                        }
-                    }else{
-                        newMarker.rotation =  0
-                    }
+                    newMarker.rotation = try resolvedRotation(for: marker)
                 } catch {
                     NSLog("Error in angle. \(error)")
                 }
@@ -506,6 +619,9 @@ public class Map {
                 self?.handleMultipleInfoWindowTap(marker: originalMarker, markerData: markerData)
             }
             
+            // Store the view before calculating its position so the sizing logic
+            // uses the actual rendered dimensions instead of fallback constants.
+            self.infoWindowMarkers[originalMarker.hash.hashValue] = infoWindowView
             
             // Calculate position and frame for the UIView
             let hasSnippet = !(markerData.snippet?.isEmpty ?? true)
@@ -524,11 +640,6 @@ public class Map {
             
             // Add the view to the map view
             self.mapViewController.GMapView.addSubview(infoWindowView)
-            
-            // Store reference
-            self.infoWindowMarkers[originalMarker.hash.hashValue] = infoWindowView
-            
-            
         }
     }
     private func updateInfoWindowContent(for markerId: Int, markerData: Marker) {
@@ -548,23 +659,27 @@ public class Map {
         }
     }
     private func handleMultipleInfoWindowTap(marker: GMSMarker, markerData: Marker) {
-        NSLog("MultipleInfoWindowView tapped for marker: \(marker.hash.hashValue)")
-        
         let userInfo = markerData
         var title = marker.title
         if title == nil || title?.isEmpty == true {
             title = userInfo.title
         }
-        
-        // Trigger the same onMarkerClick event as regular marker taps
-        self.delegate.notifyListeners("onMarkerClick", data: [
+
+        var data: [String: Any] = [
             "mapId": self.id,
-            "markerId": String(marker.hash.hashValue),
+            "markerId": markerData.id ?? String(marker.hash.hashValue),
             "latitude": marker.position.latitude,
             "longitude": marker.position.longitude,
             "title": title ?? "",
             "snippet": marker.snippet ?? ""
-        ])
+        ]
+
+        if let infoData = markerData.infoData {
+            data["customData"] = infoData
+        }
+
+        // Trigger the same onMarkerClick event as regular marker taps
+        self.delegate.notifyListeners("onMarkerClick", data: data)
     }
 
 
@@ -638,6 +753,8 @@ public class Map {
                 // Hide all multiple info windows
                 self.hideAllMultipleInfoWindows()
             }
+            // Always clean up info windows for markers absorbed into clusters
+            self.cleanupStaleInfoWindows()
         }
     }
 
@@ -649,9 +766,71 @@ public class Map {
                let infoIcon = markerData.infoIcon,
                infoIcon.contains("multiple_info_window"),
                self.infoWindowMarkers[markerId] == nil { // Only create if not already exists
+                
+                // FIX: More robust cluster state checking
+                // Skip markers that are absorbed into a cluster (map == nil means clustered)
+                let isNotClustered = self.markerIdNotOnCluster.contains(String(markerId))
+                
+                // Additional check: marker must have map reference to be visible
+                if !isNotClustered && self.mapViewController.clusteringEnabled {
+                    if marker.map == nil {
+                        // Marker is definitely clustered
+                        continue
+                    }
+                    // Double check: marker might be in transition to clustered state
+                    // Wait one more frame if clustering is in progress
+                    if self.mapViewController.isClusteringInProgress {
+                        continue
+                    }
+                }
+                
                 self.removeInfoWindowMarker(for: markerId)
                 self.createInfoWindowAsMarker(for: marker, markerData: markerData)
             }
+        }
+        // Clean up info windows for markers that got absorbed into clusters
+        self.cleanupStaleInfoWindows()
+    }
+
+    private func cleanupStaleInfoWindows() {
+        // Remove info windows for markers that are now inside a cluster (map == nil)
+        var markersToRemove = [Int]()
+        for (markerId, infoWindowView) in self.infoWindowMarkers {
+            var shouldRemove = false
+            
+            if let marker = self.markers[markerId] {
+                let isNotClustered = self.markerIdNotOnCluster.contains(String(markerId))
+                
+                // FIX: More aggressive cleanup conditions
+                if !isNotClustered && self.mapViewController.clusteringEnabled {
+                    // Remove if marker.map is nil (definitely clustered)
+                    if marker.map == nil {
+                        shouldRemove = true
+                    }
+                }
+                
+                // Also check zoom level - remove if below threshold
+                if let mapView = self.mapViewController.GMapView {
+                    let currentZoom = mapView.camera.zoom
+                    if currentZoom < self.multipleInfoWindowZoomLevel {
+                        shouldRemove = true
+                    }
+                }
+            } else {
+                // Marker no longer exists, remove its info window
+                shouldRemove = true
+            }
+            
+            if shouldRemove {
+                markersToRemove.append(markerId)
+                infoWindowView.removeFromSuperview()
+                if let miwView = infoWindowView as? MultipleInfoWindowView {
+                    miwView.onClose = nil
+                }
+            }
+        }
+        for markerId in markersToRemove {
+            self.infoWindowMarkers.removeValue(forKey: markerId)
         }
     }
 
@@ -676,8 +855,25 @@ public class Map {
         self.infoWindowMarkers.removeAll()
     }
     func onCameraMove() {
-        self.updateInfoWindowsForCurrentZoom()
-        self.updateInfoWindowPositions()
+        // FIX: During camera movement, proactively manage info window visibility
+        guard let mapView = self.mapViewController.GMapView else {
+            return
+        }
+        
+        let currentZoom = mapView.camera.zoom
+        
+        // Immediately hide info windows when zooming out beyond threshold
+        // This prevents lingering info windows during marker-to-cluster transitions
+        if currentZoom < self.multipleInfoWindowZoomLevel {
+            // Hide all info windows immediately without waiting for clustering to complete
+            for (_, infoWindowView) in self.infoWindowMarkers {
+                infoWindowView.isHidden = true
+            }
+        } else {
+            // At zoom level where info windows should be visible
+            // Update positions to track camera movement (pan/drag)
+            self.updateInfoWindowPositions()
+        }
     }
     
     func setMarkerPosition(marker: Marker) throws  -> String  {
@@ -863,17 +1059,7 @@ public class Map {
                     }
                     
                     do {
-                        // Set the map style by passing the URL of the local file.
-                        if((marker.rotation) == 1){
-                            if let angleDiff = marker.angleDiff {
-                                oldMarker.rotation = angleDiff != 0 ? angleDiff : try getAngle(marker: marker)
-                            } else {
-                                oldMarker.rotation = try getAngle(marker: marker)
-                            }
-
-                        }else{
-                            oldMarker.rotation =  0
-                        }
+                        oldMarker.rotation = try resolvedRotation(for: marker)
                     } catch {
                         NSLog("Error in angle. \(error)")
                     }
@@ -894,12 +1080,20 @@ public class Map {
                                 busesMarker.updateCardColorBasedOnIconUrl(iconUrl: iconUrl)
                                 oldMarker.iconView = busesMarker
                             }
+                        } else if let iconUrl = marker.iconUrl, iconUrl.contains("new_3d_marker") {
+                            renderDynamicMarker(gmsMarker: oldMarker, markerData: marker)
                         } else {
                             if let iconUrl = marker.iconUrl {
                                 oldMarker.icon = getCachedResizedIcon(iconUrl, marker)
                             }
                         }
                         
+                    }
+
+                    do {
+                        oldMarker.rotation = try resolvedRotation(for: marker)
+                    } catch {
+                        NSLog("Error in angle. \(error)")
                     }
                     
                     // If the marker is the selected marker, refresh the info window
@@ -912,6 +1106,10 @@ public class Map {
                         self.mapViewController.GMapView.selectedMarker = nil
                     }
                     
+                }
+
+                if let markerHash = self.markerIdOnWeb[marker.id!] {
+                    self.markersDetails[markerHash] = marker
                 }
             }
         } else {
@@ -947,6 +1145,27 @@ public class Map {
              }
 
              DispatchQueue.main.sync {
+                 self.applyMarkerPositionUpdate(oldMarker: oldMarker, marker: marker)
+             }
+         return marker.id!
+     }
+
+    /// Same as setMarkerPositionNew but callable from within an existing DispatchQueue.main.sync block.
+    /// Avoids nested DispatchQueue.main.sync deadlock.
+    func setMarkerPositionNewInline(marker: Marker) throws -> String {
+        guard let markerId = marker.id,
+              let hash = self.markerIdOnWeb[markerId],
+              let oldMarker = self.markers[hash] else {
+            NSLog("CapacitorGoogleMaps: setMarkerPositionNewInline - marker not found for id: \(marker.id ?? "nil")")
+            return marker.id ?? ""
+        }
+        self.applyMarkerPositionUpdate(oldMarker: oldMarker, marker: marker)
+        return marker.id!
+    }
+
+    /// Core marker update logic shared by setMarkerPositionNew and setMarkerPositionNewInline.
+    /// MUST be called on the main thread.
+    private func applyMarkerPositionUpdate(oldMarker: GMSMarker, marker: Marker) {
                      // Extract animation duration from infoData
                      var duration = 2.0
                      if let infoData = marker.infoData {
@@ -959,12 +1178,16 @@ public class Map {
                      let startPosition = oldMarker.position
                      let endPosition = CLLocationCoordinate2D(latitude: marker.coordinate.lat, longitude: marker.coordinate.lng)
                      let positionChanged = startPosition.latitude != endPosition.latitude || startPosition.longitude != endPosition.longitude
+                     let isClusterManaged = self.isClusterManagedMarker(oldMarker)
+                     let isRenderedIndividually = oldMarker.map != nil
+                     let shouldAnimateVisibleClusterMarker = positionChanged && isClusterManaged && isRenderedIndividually && duration > 0
 
-                     if positionChanged && duration > 0 {
+                     if shouldAnimateVisibleClusterMarker || (positionChanged && duration > 0 && !isClusterManaged) {
                          // Use CADisplayLink-based animation for reliable frame-by-frame marker + info window sync
                          let markerHash = oldMarker.hash.hashValue
                          let hasSnippet = !(marker.snippet?.isEmpty ?? true)
                          let isReverse = marker.infoIcon?.contains("reverse") ?? false
+                         let shouldRefreshClusterAfterAnimation = isClusterManaged && isRenderedIndividually
 
                          let helper = MarkerAnimationHelper(
                              startTime: CACurrentMediaTime(),
@@ -980,10 +1203,22 @@ public class Map {
                              markerHash: markerHash,
                              hasSnippet: hasSnippet,
                              isReverse: isReverse,
-                             zoomLevel: self.multipleInfoWindowZoomLevel
+                             zoomLevel: self.multipleInfoWindowZoomLevel,
+                             onComplete: { [weak self] in
+                                 guard shouldRefreshClusterAfterAnimation else { return }
+                                 self?.mapViewController.clusterMarker()
+                                 self?.updateInfoWindowPositions()
+                                 self?.updateInfoWindowsForCurrentZoom()
+                             }
                          )
                          let displayLink = CADisplayLink(target: helper, selector: #selector(MarkerAnimationHelper.step(_:)))
                          displayLink.add(to: .main, forMode: .common)
+                     } else if positionChanged && isClusterManaged {
+                         self.mapViewController.updateMarkerPosition(marker: oldMarker, newPosition: endPosition)
+                         DispatchQueue.main.async {
+                             self.updateInfoWindowPositions()
+                             self.updateInfoWindowsForCurrentZoom()
+                         }
                      } else {
                          // No animation — snap to final position
                          oldMarker.position = endPosition
@@ -1004,7 +1239,7 @@ public class Map {
                                  } else {
                                      infoWindowView.isHidden = true
                                  }
-                             } else if shouldShow {
+                             } else if shouldShow && oldMarker.map != nil {
                                  if let infoIcon = marker.infoIcon, infoIcon.contains("multiple_info_window") {
                                      self.createInfoWindowAsMarker(for: oldMarker, markerData: marker)
                                  }
@@ -1029,18 +1264,12 @@ public class Map {
                      }
                  }
                  do {
-                     if((marker.rotation) == 1){
-                             oldMarker.rotation =  try self.getAngle(marker: marker)
-                     }else{
-                         oldMarker.rotation =  0
-                     }
-                     } catch {
+                     oldMarker.rotation = try resolvedRotation(for: marker)
+                 } catch {
                      NSLog("Error in angle. \(error)")
                  }
                  oldMarker.userData = marker
-             }
-         return marker.id!
-     }
+    }
     
     func updateInfoWindow(marker: Marker) throws  -> String  {
         if let oldMarker = self.markers[Int(marker.id!)!] {
@@ -1103,32 +1332,61 @@ public class Map {
 
     func addMarkers(markers: [Marker]) throws -> [Int] {
         var markerHashes: [Int] = []
+        var batchError: Error?
 
         let newMarkerIds = Set(markers.compactMap { $0.id })
-        
-        // Phase 1: Remove stale markers (on map but not in new list)
-        let markersToRemove = self.removeMarkersArray.filter { !newMarkerIds.contains($0.id) }
-        if !markersToRemove.isEmpty {
-            do {
-                try removeMarkers(ids: markersToRemove.map { $0.keyValue })
-            } catch {
-                NSLog("CapacitorGoogleMaps: Error removing stale markers: \(error)")
-            }
-        }
-        self.removeMarkersArray.removeAll { !newMarkerIds.contains($0.id) }
 
-        // Phase 2: Update existing markers' positions
-        var existingMarkerIds = Set<String>()
-        for marker in markers {
-            guard let markerId = marker.id else { continue }
-            if self.markerIdOnWeb[markerId] != nil {
-                existingMarkerIds.insert(markerId)
-                _ = try setMarkerPositionNew(marker: marker)
-            }
-        }
-
-        // Phase 3: Add new markers
+        // Execute ALL phases (remove, update, add) in a single main-queue sync block
+        // to prevent GMUClusterManager's internal requestCluster from firing mid-batch.
         DispatchQueue.main.sync {
+            self.mapViewController.skipClustering = true
+
+            // Phase 1: Remove stale markers (on map but not in new list)
+            let markersToRemove = self.removeMarkersArray.filter { !newMarkerIds.contains($0.id) }
+            if !markersToRemove.isEmpty {
+                // Inline removal logic to avoid nested DispatchQueue.main.sync deadlock
+                var markersToRemoveFromCluster: [GMSMarker] = []
+                let idsToRemove = markersToRemove.map { $0.keyValue }
+                idsToRemove.forEach { id in
+                    if let marker = self.markers[id] {
+                        if self.mapViewController.clusteringEnabled {
+                            markersToRemoveFromCluster.append(marker)
+                        }
+                        marker.map = nil
+                        self.markers.removeValue(forKey: id)
+                        self.markersDetails.removeValue(forKey: id)
+                        // Clean up info window if present
+                        if let infoWindowView = self.infoWindowMarkers[id] {
+                            infoWindowView.removeFromSuperview()
+                            self.infoWindowMarkers.removeValue(forKey: id)
+                        }
+                    }
+                }
+                let removedSet = Set(idsToRemove)
+                self.markerIdOnWeb = self.markerIdOnWeb.filter { !removedSet.contains($0.value) }
+
+                if self.mapViewController.clusteringEnabled && !markersToRemoveFromCluster.isEmpty {
+                    if let clusterManager = self.mapViewController.clusterManager {
+                        markersToRemoveFromCluster.forEach { clusterManager.remove($0) }
+                    }
+                }
+            }
+            self.removeMarkersArray.removeAll { !newMarkerIds.contains($0.id) }
+
+            // Phase 2: Update existing markers' positions
+            var existingMarkerIds = Set<String>()
+            for marker in markers {
+                guard let markerId = marker.id else { continue }
+                guard let hash = self.markerIdOnWeb[markerId],
+                      let _ = self.markers[hash] else { continue }
+                existingMarkerIds.insert(markerId)
+                // Inline setMarkerPositionNew logic to avoid nested DispatchQueue.main.sync
+                do {
+                    _ = try self.setMarkerPositionNewInline(marker: marker)
+                } catch {
+                    NSLog("CapacitorGoogleMaps: Error updating marker \(markerId): \(error)")
+                }
+            }
             var googleMapsMarkers: [GMSMarker] = []
             markers.forEach { marker in
                 guard let markerId = marker.id else { return }
@@ -1244,15 +1502,7 @@ public class Map {
 
                 // Rotation handling
                 do {
-                    if (marker.rotation) == 1 {
-                        if let angleDiff = marker.angleDiff {
-                            newMarker.rotation = angleDiff != 0 ? angleDiff : try getAngle(marker: marker)
-                        } else {
-                            newMarker.rotation = try getAngle(marker: marker)
-                        }
-                    } else {
-                        newMarker.rotation = 0
-                    }
+                    newMarker.rotation = try resolvedRotation(for: marker)
                 } catch {
                     NSLog("Error in angle. \(error)")
                 }
@@ -1284,6 +1534,12 @@ public class Map {
             // Cluster all at once (performance optimization)
             if self.mapViewController.clusteringEnabled && !googleMapsMarkers.isEmpty {
                 self.mapViewController.addMarkersToCluster(markers: googleMapsMarkers)
+            }
+
+            // Re-enable clustering and perform a single cluster pass
+            self.mapViewController.skipClustering = false
+            if self.mapViewController.clusteringEnabled {
+                self.mapViewController.clusterMarker()
             }
         }
         return markerHashes
@@ -1445,6 +1701,37 @@ public class Map {
             DispatchQueue.main.sync {
                 self.mapViewController.initClusterManager()
 
+                // GMUClusterManager steals the map view delegate internally.
+                // Reclaim it so camera events go through the plugin and all
+                // clustering is routed through the exception-safe clusterMarker().
+                self.mapViewController.GMapView.delegate = self.delegate
+
+                // Set up recovery handler so markers are re-added after a clustering failure.
+                // Note: skipClustering is set to true by clusterMarker() before calling this,
+                // so addMarkersToCluster will NOT trigger another cluster() call.
+                self.mapViewController.clusterRecoveryHandler = { [weak self] in
+                    guard let self = self else { return }
+                    var validMarkers: [GMSMarker] = []
+                    for (key, marker) in self.markers {
+                        if let detail = self.markersDetails[key], !(detail.isClustered ?? true) {
+                            continue
+                        }
+                        // Validate coordinates before re-adding
+                        let lat = marker.position.latitude
+                        let lng = marker.position.longitude
+                        guard lat.isFinite && lng.isFinite
+                              && lat >= -90 && lat <= 90
+                              && lng >= -180 && lng <= 180 else {
+                            NSLog("CapacitorGoogleMaps: recovery skipping marker with invalid coords (\(lat), \(lng))")
+                            continue
+                        }
+                        validMarkers.append(marker)
+                    }
+                    if !validMarkers.isEmpty {
+                        self.mapViewController.addMarkersToCluster(markers: validMarkers)
+                    }
+                }
+
                 // add existing markers to the cluster
                 if !self.markers.isEmpty {
                     var existingMarkers: [GMSMarker] = []
@@ -1480,6 +1767,12 @@ public class Map {
         DispatchQueue.main.async {
             for (markerId, infoWindowView) in self.infoWindowMarkers {
                 if let marker = self.markers[markerId] {
+                    // Hide info window if marker is absorbed into a cluster
+                    let isNotClustered = self.markerIdNotOnCluster.contains(String(markerId))
+                    if !isNotClustered && self.mapViewController.clusteringEnabled && marker.map == nil {
+                        infoWindowView.isHidden = true
+                        continue
+                    }
                     if let markerData = marker.userData as? Marker {
                         let hasSnippet = !(markerData.snippet?.isEmpty ?? true)
                         let screenPosition = self.calculateInfoWindowScreenPosition(
@@ -1489,6 +1782,7 @@ public class Map {
                                             isReverseInfoWindow :markerData.infoIcon?.contains("reverse") ?? false
                                         )
                         infoWindowView.frame.origin = screenPosition
+                        infoWindowView.isHidden = false
                     }
                 }
             }
@@ -1498,7 +1792,7 @@ public class Map {
     func removeMarker(id: Int) throws {
         if (id != 0) {
             if let marker = self.markers[id] {
-                DispatchQueue.main.async {
+                DispatchQueue.main.sync {
                     self.removeInfoWindowMarker(for: id)
                     if self.mapViewController.clusteringEnabled {
                         self.mapViewController.removeMarkersFromCluster(markers: [marker])
@@ -2014,6 +2308,7 @@ class MarkerAnimationHelper: NSObject {
     private let hasSnippet: Bool
     private let isReverse: Bool
     private let zoomLevel: Float
+    private let onComplete: (() -> Void)?
 
     init(startTime: CFTimeInterval, duration: Double,
          startLat: Double, startLng: Double,
@@ -2025,7 +2320,8 @@ class MarkerAnimationHelper: NSObject {
          markerHash: Int,
          hasSnippet: Bool,
          isReverse: Bool,
-         zoomLevel: Float) {
+         zoomLevel: Float,
+         onComplete: (() -> Void)? = nil) {
         self.startTime = startTime
         self.duration = duration
         self.startLat = startLat
@@ -2040,6 +2336,7 @@ class MarkerAnimationHelper: NSObject {
         self.hasSnippet = hasSnippet
         self.isReverse = isReverse
         self.zoomLevel = zoomLevel
+        self.onComplete = onComplete
     }
 
     @objc func step(_ displayLink: CADisplayLink) {
@@ -2060,7 +2357,8 @@ class MarkerAnimationHelper: NSObject {
         // Update info window position on every frame
         if let infoWindowView = infoWindowView, let mapView = mapView, let map = map {
             let currentZoom = mapView.camera.zoom
-            if currentZoom >= zoomLevel {
+            // Hide info window if marker is absorbed into a cluster (map == nil)
+            if currentZoom >= zoomLevel && gmsMarker.map != nil {
                 let screenPos = map.calculateInfoWindowScreenPosition(
                     for: newPosition,
                     markerId: markerHash,
@@ -2069,13 +2367,14 @@ class MarkerAnimationHelper: NSObject {
                 )
                 infoWindowView.frame.origin = screenPos
                 infoWindowView.isHidden = false
+            } else {
+                infoWindowView.isHidden = true
             }
         }
 
         if fraction >= 1.0 {
             displayLink.invalidate()
+            onComplete?()
         }
     }
 }
-
-
