@@ -389,6 +389,13 @@ export interface Marker {
    * @default 0
    */
   zIndex?: number;
+
+  /**
+   * When true, hides the heading arrow on dynamic 3D bus markers.
+   *
+   * @default false
+   */
+  hideArrow?: boolean;
 }
 
 /**

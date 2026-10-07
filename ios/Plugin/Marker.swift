@@ -24,6 +24,7 @@ public struct Marker {
     let customAnchor: CGPoint?
     let bearingAngle: Double?
     let markerBgColor: UIColor?
+    let hideArrow: Bool
 
     init(fromJSObject: JSObject) throws {
         let lat: Double
@@ -104,7 +105,7 @@ public struct Marker {
         self.isFlat = fromJSObject["isFlat"] as? Bool
         self.iconUrl = resolvedIconUrl
         self.draggable = fromJSObject["draggable"] as? Bool
-        self.isClustered = fromJSObject["isClustered"] as? Bool ?? true
+        self.isClustered = fromJSObject["isClustered"] as? Bool ?? false
         self.iconSize = iconSize
         self.iconAnchor = iconAnchor
         self.customAnchor = customAnchor
@@ -119,6 +120,7 @@ public struct Marker {
         self.id = fromJSObject["id"] as? String
         self.secondaryImageUrl = fromJSObject["secondaryImage"] as? String
         self.skipTitle = fromJSObject["skipTitle"] as? Bool
+        self.hideArrow = fromJSObject["hideArrow"] as? Bool ?? false
 
     }
 }

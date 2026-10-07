@@ -35,7 +35,8 @@ final class DynamicMarkerGenerator {
     func generateMarker(
         busImage: UIImage,
         statusColor: UIColor,
-        angle: CGFloat
+        angle: CGFloat,
+        showArrow: Bool = true
     ) -> UIImage {
 
         let renderer = UIGraphicsImageRenderer(
@@ -51,14 +52,14 @@ final class DynamicMarkerGenerator {
                 x: bitmapWidth / 2,
                 y: topPadding + arrowHeight + gap + circleSize / 2
             )
-
-            drawArrow(
-                context: context,
-                pivot: pivot,
-                angle: angle,
-                color: statusColor
-            )
-
+            if showArrow {
+                drawArrow(
+                    context: context,
+                    pivot: pivot,
+                    angle: angle,
+                    color: statusColor
+                )
+            }
             drawCircle(
                 context: context,
                 center: pivot,
