@@ -1210,7 +1210,15 @@ class CapacitorGoogleMap(
                             }
                         } else {
                             // Setting the new icon if the icon is modified
-                            marker?.iconUrl?.let { oldMarker?.updateIcon(it, marker.title, marker.snippet, marker.bearingAngle) }
+                            marker?.iconUrl?.let {
+                                oldMarker?.updateIcon(
+                                    it,
+                                    marker.title,
+                                    marker.snippet,
+                                    marker.bearingAngle,
+                                    marker.hideArrow
+                                )
+                            }
                         }
 
                         if (!marker.infoIcon.isNullOrEmpty() && (!marker.infoIcon.equals("not_show_info_window"))) {
@@ -1432,7 +1440,15 @@ class CapacitorGoogleMap(
                     }
                 } else if (shouldUpdateVisibleMarker) {
                     // Setting the new icon if the icon is modified
-                    marker.iconUrl?.let { oldMarker.updateIcon(it, marker.title, marker.snippet, marker.bearingAngle) }
+                    marker.iconUrl?.let {
+                        oldMarker.updateIcon(
+                            it,
+                            marker.title,
+                            marker.snippet,
+                            marker.bearingAngle,
+                            marker.hideArrow
+                        )
+                    }
                     if(marker.title.isNotEmpty()) {
                         activeMarker?.title = marker.title
                     }

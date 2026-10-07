@@ -287,7 +287,13 @@ class CapacitorGoogleMapMarker(val context: Context, fromJSONObject: JSONObject)
         return markerOptions
     }
 
-    fun updateIcon(newIconName: String, title: String, snippet: String, bearingAngle: Float) {
+    fun updateIcon(
+        newIconName: String,
+        title: String,
+        snippet: String,
+        bearingAngle: Float,
+        hideArrow: Boolean = this.hideArrow
+    ) {
         iconUrl = newIconName
         val resources: Resources = context.resources
         val resourceId: Int = resources.getIdentifier(iconUrl, "drawable", context.packageName)
