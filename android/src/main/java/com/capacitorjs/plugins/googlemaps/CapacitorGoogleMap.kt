@@ -108,6 +108,7 @@ class CapacitorGoogleMap(
         target.angleDiff = source.angleDiff
         target.bearingAngle = source.bearingAngle
         target.markerBgColor = source.markerBgColor
+        target.hideArrow = source.hideArrow
         target.iconSize = source.iconSize
         target.markerOptions = source.getMarkerOptionsUpdated().rotation(resolveMarkerRotation(source))
     }
@@ -1412,7 +1413,8 @@ class CapacitorGoogleMap(
                         marker.title != oldMarker.getTitle() ||
                         marker.snippet != oldMarker.getSnippet() ||
                         marker.bearingAngle != oldMarker.bearingAngle ||
-                        marker.markerBgColor != oldMarker.markerBgColor
+                        marker.markerBgColor != oldMarker.markerBgColor ||
+                        marker.hideArrow != oldMarker.hideArrow
 
                 oldMarker.coordinate = marker.coordinate
                 syncMarkerHeadingState(oldMarker, marker)

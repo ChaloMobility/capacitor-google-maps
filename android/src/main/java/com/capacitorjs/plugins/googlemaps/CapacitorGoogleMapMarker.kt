@@ -37,6 +37,7 @@ class CapacitorGoogleMapMarker(val context: Context, fromJSONObject: JSONObject)
     var hasAngleDiff: Boolean = false
     var id: String? = null
     var bearingAngle: Float = 0.0f
+    var hideArrow: Boolean = false
     private var customAnchor: CapacitorGoogleMapsPoint = CapacitorGoogleMapsPoint(0.5F, 0.5F)
 
     init {
@@ -103,6 +104,7 @@ class CapacitorGoogleMapMarker(val context: Context, fromJSONObject: JSONObject)
         hasAngleDiff = fromJSONObject.has("angleDiff")
         angleDiff = fromJSONObject.optDouble("angleDiff", 0.0 ).toFloat()
         bearingAngle = fromJSONObject.optDouble("bearingAngle",0.0).toFloat()
+        hideArrow = fromJSONObject.optBoolean("hideArrow", false)
     }
 
     override fun getPosition(): LatLng {
@@ -236,7 +238,8 @@ class CapacitorGoogleMapMarker(val context: Context, fromJSONObject: JSONObject)
             val descriptor = generator.generateMarker(
                 busIconRes =  R.drawable.ic_bus_white,   // your bus drawable
                 statusColor = safeColor,
-                angle = bearingAngle ?: 0f
+                angle = bearingAngle ?: 0f,
+                showArrow = !hideArrow
             )
 
             markerOptions
@@ -314,7 +317,8 @@ class CapacitorGoogleMapMarker(val context: Context, fromJSONObject: JSONObject)
                     generator.generateMarker(
                         busIconRes = R.drawable.ic_bus_white,
                         statusColor =  Color.parseColor(markerBgColor),
-                        angle = bearingAngle
+                        angle = bearingAngle,
+                        showArrow = !hideArrow
                     )
                 )
             }

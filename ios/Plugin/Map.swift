@@ -2168,13 +2168,13 @@ public class Map {
                     bearingAngle = oldData.bearingAngle
                 }
             }
-
+            let showArrow = !markerData.hideArrow
             let resolvedColor = statusColor ?? .systemGreen
             let resolvedAngle = CGFloat(bearingAngle ?? 0)
             // Quantize angle to 5-degree steps to reduce unique cache entries
-            let quantizedAngle = Int(round(resolvedAngle / 5.0)) * 5
+            let quantizedAngle = showArrow ? Int(round(resolvedAngle / 5.0)) * 5 : 0
             let colorHex = resolvedColor.toHexString()
-            let cacheKey = "3d_\(colorHex)_\(quantizedAngle)"
+            let cacheKey = "3d_\(colorHex)_\(quantizedAngle)_\(showArrow)"
 
             if let cachedIcon = self.dynamicMarkerCache[cacheKey] {
                 gmsMarker.icon = cachedIcon
@@ -2183,7 +2183,8 @@ public class Map {
                 let icon = generator.generateMarker(
                     busImage: UIImage(named: "white_bus") ?? UIImage(),
                     statusColor: resolvedColor,
-                    angle: CGFloat(quantizedAngle)
+                    angle: CGFloat(quantizedAngle),
+                    showArrow: showArrow
                 )
                 self.dynamicMarkerCache[cacheKey] = icon
                 gmsMarker.icon = icon

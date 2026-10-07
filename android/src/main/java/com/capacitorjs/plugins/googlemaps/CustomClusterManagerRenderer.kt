@@ -114,7 +114,8 @@ class CustomClusterManagerRenderer(
                 val descriptor = generator.generateMarker(
                     busIconRes = R.drawable.ic_bus_white,
                     statusColor = safeColor,
-                    angle = item.bearingAngle
+                    angle = item.bearingAngle,
+                    showArrow = !item.hideArrow
                 )
                 markerOptions.icon(descriptor)
                 markerOptions.anchor(
@@ -221,7 +222,8 @@ class CustomClusterManagerRenderer(
                 val descriptor = generator.generateMarker(
                     busIconRes = R.drawable.ic_bus_white,
                     statusColor = safeColor,
-                    angle = item.bearingAngle
+                    angle = item.bearingAngle,
+                    showArrow = !item.hideArrow
                 )
                 marker.setIcon(descriptor)
             }

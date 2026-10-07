@@ -37,19 +37,22 @@ class DynamicMarkerGenerator(private val context: Context) {
      * @param busIconRes Drawable resource for bus icon (keeps original pixels)
      * @param statusColor Color for circle and arrow
      * @param angle Rotation angle for arrow (0-360°)
+     * @param showArrow When false, only the bus circle is drawn
      */
     fun generateMarker(
         @DrawableRes busIconRes: Int,
         @ColorInt statusColor: Int,
-        angle: Float
+        angle: Float,
+        showArrow: Boolean = true
     ): BitmapDescriptor {
 
         val bitmap = Bitmap.createBitmap(BITMAP_WIDTH, BITMAP_HEIGHT, Bitmap.Config.ARGB_8888)
         bitmap.setHasAlpha(true)
         val canvas = Canvas(bitmap)
 
-        // ---------------- Draw rotated arrow ----------------
-        drawArrow(canvas, statusColor, angle)
+        if (showArrow) {
+            drawArrow(canvas, statusColor, angle)
+        }
 
         // ---------------- Draw bus circle ----------------
         drawCircle(canvas, statusColor)
