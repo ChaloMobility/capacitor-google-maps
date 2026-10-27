@@ -788,18 +788,14 @@ class CapacitorGoogleMap(
     }
 
     private fun resolveVisibleMarker(item: CapacitorGoogleMapMarker): Marker? {
-        val attachedMarker = item.googleMapMarker
-        if (attachedMarker?.isVisible == true) {
-            return attachedMarker
-        }
-
+        // The cluster renderer removes item markers when it re-clusters, so item.googleMapMarker
+        // can point to a removed Marker (isVisible still reads true; setIcon throws "Unmanaged descriptor").
+        // Only the renderer's current marker is safe to touch; null means the item is inside a cluster.
         val renderedMarker = getRenderedMarker(item)
-        if (renderedMarker?.isVisible == true) {
+        if (renderedMarker != null) {
             item.googleMapMarker = renderedMarker
-            return renderedMarker
         }
-
-        return attachedMarker ?: renderedMarker
+        return renderedMarker
     }
 
     private fun requestClusteredInfoWindowRefresh() {
@@ -1441,6 +1437,11 @@ class CapacitorGoogleMap(
                 } else if (shouldUpdateVisibleMarker) {
                     // Setting the new icon if the icon is modified
                     marker.iconUrl?.let {
+                        if (isClusterManaged && activeMarker == null) {
+                            // Item is clustered; the renderer draws it from iconUrl on the next pass
+                            oldMarker.iconUrl = it
+                            return@let
+                        }
                         oldMarker.updateIcon(
                             it,
                             marker.title,
