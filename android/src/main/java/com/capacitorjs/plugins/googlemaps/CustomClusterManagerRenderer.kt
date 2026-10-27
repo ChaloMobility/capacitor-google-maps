@@ -134,7 +134,9 @@ class CustomClusterManagerRenderer(
         }
 
         // Set info window adapter based on infoIcon
-        if (!item.infoIcon.isNullOrEmpty() && item.infoIcon != "not_show_info_window") {
+        // multiple_info_window is drawn as a separate view, not via the map-wide adapter;
+        // setting one here leaks CustomInfoWindowAdapter onto every other marker (e.g. stops)
+        if (!item.infoIcon.isNullOrEmpty() && item.infoIcon != "not_show_info_window" && item.infoIcon?.contains("multiple_info_window") != true) {
             when {
                 item.infoIcon == "buses_info_icon" -> {
                     map.setInfoWindowAdapter(BusesMarkerInfoWindow(context))

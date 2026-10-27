@@ -11,8 +11,6 @@
         app:cardCornerRadius="25dp"
         android:id="@+id/busAlertCardView"
         app:cardBackgroundColor="#e19602"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
         >
 
         <LinearLayout
