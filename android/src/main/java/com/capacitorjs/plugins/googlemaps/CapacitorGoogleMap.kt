@@ -365,7 +365,6 @@ class CapacitorGoogleMap(
                                 val routeNameMarker = RouteNameMarker(bridge.context)
                                 markerOptions.icon(routeNameMarker.getMarkerIcon(it.title))
                                 markerOptions.anchor(0.5f, 1.0f)
-                                markerOptions.zIndex(1000f)
                                 markerOptions.title("")
                             }
 
@@ -619,7 +618,6 @@ class CapacitorGoogleMap(
                         val routeNameMarker = RouteNameMarker(bridge.context)
                         markerOptions.icon(routeNameMarker.getMarkerIcon(marker.title))
                         markerOptions.anchor(0.5f, 1.0f)
-                        markerOptions.zIndex(1000f)
 //                        To remove info window set title as empty string
                         markerOptions.title("")
                     }

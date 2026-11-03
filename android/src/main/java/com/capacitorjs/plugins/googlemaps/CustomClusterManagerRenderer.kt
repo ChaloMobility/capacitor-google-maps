@@ -91,7 +91,6 @@ class CustomClusterManagerRenderer(
                 val routeNameMarker = RouteNameMarker(context)
                 markerOptions.icon(routeNameMarker.getMarkerIcon(item.getTitle()))
                 markerOptions.anchor(0.5f, 1.0f)
-                markerOptions.zIndex(1000f)
                 markerOptions.title("")
             }
             iconUrl?.contains("overspeed_marker") == true -> {
